@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Ultimate Survivor</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
+        }
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #111111;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        #error-log {
+            display: none;
+            color: #ff4757;
+            background: #2d3436;
+            padding: 20px;
+            border-radius: 8px;
+            max-width: 320px;
+            text-align: center;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        canvas {
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.7);
+            touch-action: none;
+        }
+    </style>
+    <!-- Phaser 3 Engine via CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.80.1/phaser.min.js" 
+            onerror="document.getElementById('error-log').style.display='block';"></script>
+</head>
+<body>
+
+<div id="error-log">
+    ⚠️ <strong>Phaser Engine Failed to Load</strong><br><br>
+    Please ensure you are connected to the internet. If testing locally, open this file via a local server (like Live Server in VS Code) or GitHub Pages.
+</div>
+
+<script>
+    if (typeof Phaser === 'undefined') {
+        document.getElementById('error-log').style.display = 'block';
+    } else {
+        const config = {
+            type: Phaser.AUTO,
+            scale: {
+                mode: Phaser.Scale.FIT,
+                autoCenter: Phaser.Scale.CENTER_BOTH,
+                width: 400,
+                height: 700
+            },
+            physics: {
+                default: 'arcade',
+                arcade: {
+                    gravity: { y: 0 },
+                    debug: false
+                }
+            },
+            scene: {
+                preload: preload,
+                create: create,
+                update: update
+            }
+        };
+
+        const game = new Phaser.Game(config);
+
+        // State variables
+        let player, enemies, bullets, gems;
+        let cursors, wasd;
+        let score = 0, playerLevel = 1, xp = 0, xpToNextLevel = 5;
+        let hudText, titleText, isGameOver = false;
+
+        function preload() {
+            let g = this.add.graphics();
+
+            // 1. Player (Green Circle)
+            g.fillStyle(0x2ecc71, 1);
+            g.fillCircle(16, 16, 16);
+            g.generateTexture('player', 32, 32);
+            g.clear();
+
+            // 2. Enemy (Red Circle)
+            g.fillStyle(0xe74c3c, 1);
+            g.fillCircle(12, 12, 12);
+            g.generateTexture('enemy', 24, 24);
+            g.clear();
+
+            // 3. Bullet (Cyan Orb)
+            g.fillStyle(0x00d2d3, 1);
+            g.fillCircle(6, 6, 6);
+            g.generateTexture('bullet', 12, 12);
+            g.clear();
+
+            // 4. XP Gem (Yellow Diamond)
+            g.fillStyle(0xf1c40f, 1);
+            g.beginPath();
+            g.moveTo(6, 0);
+            g.lineTo(12, 6);
+            g.lineTo(6, 12);
+            g.lineTo(0, 6);
+            g.closePath();
+            g.fillPath();
+            g.generateTexture('gem', 12, 12);
+            g.destroy();
+        }
+
+        function create() {
+            isGameOver = false;
+            score = 0;
+            playerLevel = 1;
+            xp = 0;
+            xpToNextLevel = 5;
+
+            // Player Setup
+            player = this.physics.add.sprite(200, 350, 'player');
+            player.setCollideWorldBounds(true);
+            player.setCircle(16);
+
+            // Physics Groups
+            enemies = this.physics.add.group();
+            bullets = this.physics.add.group();
+            gems = this.physics.add.group();
+
+            // Desktop Keyboard Input
+            cursors = this.input.keyboard.createCursorKeys();
+            wasd = this.input.keyboard.addKeys({
+                up: Phaser.Input.Keyboard.KeyCodes.W,
+                down: Phaser.Input.Keyboard.KeyCodes.S,
+                left: Phaser.Input.Keyboard.KeyCodes.A,
+                right: Phaser.Input.Keyboard.KeyCodes.D
+            });
+
+            // Game Branding Header
+            titleText = this.add.text(200, 20, 'ULTIMATE SURVIVOR', {
+                fontSize: '14px',
+                fill: '#2ecc71',
+                fontStyle: 'bold'
+            }).setOrigin(0.5, 0);
+
+            // HUD Text
+            hudText = this.add.text(16, 42, '', {
+                fontSize: '14px',
+                fill: '#ffffff',
+                fontStyle: 'bold'
+            });
+            updateHUD();
+
+            // Timers
+            this.time.addEvent({
+                delay: 1000,
+                callback: () => { if (!isGameOver) { score++; updateHUD(); } },
+                loop: true
+            });
+
+            this.time.addEvent({
+                delay: 750,
+                callback: spawnEnemy,
+                callbackScope: this,
+                loop: true
+            });
+
+            this.time.addEvent({
+                delay: 380,
+                callback: autoFire,
+                callbackScope: this,
+                loop: true
+            });
+
+            // Overlaps & Collisions
+            this.physics.add.overlap(player, enemies, hitPlayer, null, this);
+            this.physics.add.overlap(bullets, enemies, hitEnemyWithBullet, null, this);
+            this.physics.add.overlap(player, gems, collectGem, null, this);
+        }
+
+        function update() {
+            if (isGameOver) return;
+
+            const speed = 250;
+            player.setVelocity(0);
+
+            // Mobile Touch / Drag Controls
+            if (this.input.activePointer.isDown) {
+                this.physics.moveToObject(player, this.input.activePointer, speed);
+            } 
+            // Keyboard Controls
+            else {
+                if (cursors.left.isDown || wasd.left.isDown) player.setVelocityX(-speed);
+                else if (cursors.right.isDown || wasd.right.isDown) player.setVelocityX(speed);
+
+                if (cursors.up.isDown || wasd.up.isDown) player.setVelocityY(-speed);
+                else if (cursors.down.isDown || wasd.down.isDown) player.setVelocityY(speed);
+            }
+
+            // Homing Enemy AI
+            enemies.getChildren().forEach(enemy => {
+                const enemySpeed = 110 + Math.min(score * 2, 150);
+                this.physics.moveToObject(enemy, player, enemySpeed);
+            });
+
+            // XP Gem Vacuum / Magnet
+            gems.getChildren().forEach(gem => {
+                if (Phaser.Math.Distance.BetweenPoints(player, gem) < 130) {
+                    this.physics.moveToObject(gem, player, 340);
+                }
+            });
+
+            // Clean up out-of-bounds projectiles
+            bullets.getChildren().forEach(bullet => {
+                if (bullet.x < -20 || bullet.x > 420 || bullet.y < -20 || bullet.y > 720) {
+                    bullet.destroy();
+                }
+            });
+        }
+
+        function spawnEnemy() {
+            if (isGameOver) return;
+
+            let x, y;
+            if (Math.random() < 0.5) {
+                x = Math.random() < 0.5 ? -20 : 420;
+                y = Math.random() * 700;
+            } else {
+                x = Math.random() * 400;
+                y = Math.random() < 0.5 ? -20 : 720;
+            }
+
+            const enemy = enemies.create(x, y, 'enemy');
+            enemy.setCircle(12);
+        }
+
+        function autoFire() {
+            if (isGameOver || enemies.getLength() === 0) return;
+
+            const nearestEnemy = this.physics.closest(player, enemies.getChildren());
+            if (nearestEnemy) {
+                const bullet = bullets.create(player.x, player.y, 'bullet');
+                bullet.setCircle(6);
+                this.physics.moveToObject(bullet, nearestEnemy, 520);
+            }
+        }
+
+        function hitEnemyWithBullet(bullet, enemy) {
+            const gem = gems.create(enemy.x, enemy.y, 'gem');
+            gem.setCircle(6);
+
+            bullet.destroy();
+            enemy.destroy();
+        }
+
+        function collectGem(player, gem) {
+            gem.destroy();
+            xp++;
+
+            if (xp >= xpToNextLevel) {
+                xp = 0;
+                playerLevel++;
+                xpToNextLevel = Math.floor(xpToNextLevel * 1.5);
+
+                player.setScale(1.3);
+                this.tweens.add({
+                    targets: player,
+                    scale: 1.0,
+                    duration: 200
+                });
+            }
+
+            updateHUD();
+        }
+
+        function hitPlayer(player, enemy) {
+            this.physics.pause();
+            player.setTint(0xff0000);
+            isGameOver = true;
+
+            this.add.text(200, 320, 'ULTIMATE SURVIVOR', {
+                fontSize: '22px',
+                fill: '#2ecc71',
+                fontStyle: 'bold'
+            }).setOrigin(0.5);
+
+            this.add.text(200, 360, 'GAME OVER\nClick / Tap to Restart', {
+                fontSize: '20px',
+                fill: '#ff4757',
+                align: 'center',
+                fontStyle: 'bold'
+            }).setOrigin(0.5);
+
+            this.input.once('pointerdown', () => {
+                this.scene.restart();
+            });
+        }
+
+        function updateHUD() {
+            hudText.setText(`Time: ${score}s   Lvl: ${playerLevel}   XP: ${xp}/${xpToNextLevel}`);
+        }
+    }
+</script>
+</body>
+</html>
+
