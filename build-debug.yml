@@ -1,0 +1,62 @@
+name: Build Debug APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "ultimate-survivor.html"
+      - ".github/workflows/build-debug.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Create Capacitor project
+        run: |
+          npm init -y
+          npm install @capacitor/core @capacitor/cli @capacitor/android
+          npx cap init "Ultimate Survivor" com.fatefulgames.ultimatesurvivor --web-dir=www
+          mkdir -p www
+          cp ultimate-survivor.html www/index.html
+          npx cap add android
+
+      - name: Set dark background so cold start doesn't flash white
+        run: |
+          node -e "
+            const fs = require('fs');
+            const c = JSON.parse(fs.readFileSync('capacitor.config.json', 'utf8'));
+            c.android = Object.assign({}, c.android, { backgroundColor: '#0a0e14' });
+            fs.writeFileSync('capacitor.config.json', JSON.stringify(c, null, 2));
+          "
+          npx cap sync android
+
+      - name: Lock to portrait
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          sed -i 's|android:name=".MainActivity"|android:name=".MainActivity" android:screenOrientation="portrait"|' $MANIFEST
+          grep -q 'screenOrientation="portrait"' $MANIFEST \
+            || { echo "::error::portrait patch did not apply - MainActivity attribute format changed"; exit 1; }
+
+      - name: Build debug APK
+        run: cd android && ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ultimate-survivor-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
