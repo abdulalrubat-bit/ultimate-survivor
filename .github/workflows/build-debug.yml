@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - "ultimate-survivor.html"
+      - "assets/**"
       - ".github/workflows/build-debug.yml"
 
 jobs:
@@ -25,6 +26,14 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      - name: Check the assets folder is really a folder
+        run: |
+          test -d assets || { echo "::error::assets/ is missing or is a file, not a folder"; exit 1; }
+          for f in icon-only icon-foreground icon-background splash splash-dark; do
+            test -f "assets/$f.png" || { echo "::error::assets/$f.png is missing"; exit 1; }
+          done
+          echo "all five source images present"
+
       - name: Create Capacitor project
         run: |
           npm init -y
@@ -42,7 +51,9 @@ jobs:
             c.android = Object.assign({}, c.android, { backgroundColor: '#0a0e14' });
             fs.writeFileSync('capacitor.config.json', JSON.stringify(c, null, 2));
           "
-          - name: Generate icons and splash
+          npx cap sync android
+
+      - name: Generate icons and splash
         run: |
           npm install --save-dev @capacitor/assets
           npx @capacitor/assets generate --android \
@@ -51,15 +62,14 @@ jobs:
             --iconBackgroundColor '#0A0E14' \
             --iconBackgroundColorDark '#0A0E14'
           test -f android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_foreground.png \
-            || { echo "::error::icon generation produced nothing - check the assets/ folder"; exit 1; }
-          npx cap sync android
+            || { echo "::error::icon generation produced nothing"; exit 1; }
 
       - name: Lock to portrait
         run: |
           MANIFEST=android/app/src/main/AndroidManifest.xml
           sed -i 's|android:name=".MainActivity"|android:name=".MainActivity" android:screenOrientation="portrait"|' $MANIFEST
           grep -q 'screenOrientation="portrait"' $MANIFEST \
-            || { echo "::error::portrait patch did not apply - MainActivity attribute format changed"; exit 1; }
+            || { echo "::error::portrait patch did not apply"; exit 1; }
 
       - name: Build debug APK
         run: cd android && ./gradlew assembleDebug --no-daemon
