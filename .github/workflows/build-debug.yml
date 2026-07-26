@@ -42,6 +42,16 @@ jobs:
             c.android = Object.assign({}, c.android, { backgroundColor: '#0a0e14' });
             fs.writeFileSync('capacitor.config.json', JSON.stringify(c, null, 2));
           "
+          - name: Generate icons and splash
+        run: |
+          npm install --save-dev @capacitor/assets
+          npx @capacitor/assets generate --android \
+            --splashBackgroundColor '#20143E' \
+            --splashBackgroundColorDark '#20143E' \
+            --iconBackgroundColor '#0A0E14' \
+            --iconBackgroundColorDark '#0A0E14'
+          test -f android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_foreground.png \
+            || { echo "::error::icon generation produced nothing - check the assets/ folder"; exit 1; }
           npx cap sync android
 
       - name: Lock to portrait
