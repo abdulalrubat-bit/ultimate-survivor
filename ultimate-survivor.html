@@ -1,0 +1,2478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Ultimate Survivor</title>
+<style>
+* {
+  box-sizing: border-box;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background-color: #0a0e14;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+#error-log {
+  display: none;
+  color: #ff4757;
+  background: #16202a;
+  padding: 20px;
+  border-radius: 8px;
+  max-width: 320px;
+  text-align: center;
+  font-size: 14px;
+  line-height: 1.5;
+}
+#crash {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 9999;
+  background: #3a0d12;
+  color: #ffb3ba;
+  font-family: monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 45vh;
+  overflow-y: auto;
+}
+canvas {
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.7);
+  touch-action: none;
+}
+</style>
+<!-- Phaser 3 via CDN.
+     ANDROID TODO: swap this for a local phaser.min.js or the app won't
+     start without internet. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.80.1/phaser.min.js"
+onerror="document.getElementById('error-log').style.display='block';"></script>
+</head>
+<body>
+
+<div id="crash"></div>
+
+<div id="error-log">
+⚠️ <strong>Phaser Engine Failed to Load</strong><br><br>
+Check your internet connection. If you're testing locally, open this file through a local server (Live Server in VS Code, or GitHub Pages) rather than double-clicking it.
+</div>
+
+<script>
+// Runs before anything else. There's no console on a phone, so any
+// uncaught error gets painted at the top of the screen instead.
+(function () {
+  function show(label, detail) {
+    var d = document.getElementById('crash');
+    if (!d) return;
+    d.style.display = 'block';
+    d.textContent += (d.textContent ? '\n\n' : '') + label + '\n' + detail;
+  }
+  window.addEventListener('error', function (e) {
+    show('ERROR', (e.message || e.type) +
+      (e.filename ? '\nline ' + e.lineno + ':' + e.colno : ''));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e.reason;
+    show('UNHANDLED PROMISE', (r && r.message) ? r.message : String(r));
+  });
+})();
+</script>
+
+<script>
+if (typeof Phaser === 'undefined') {
+  document.getElementById('error-log').style.display = 'block';
+} else {
+
+// ===============================================================
+// TUNING
+// ===============================================================
+const CFG = {
+  version: 'v15',
+  width: 400,
+  height: 700,
+
+  // Player
+  playerSpeed: 250,
+  playerMaxHp: 3,          // set to 1 for the original one-hit-death game
+  invulnMs: 1100,          // i-frames after taking a hit
+  moveDeadzone: 6,
+
+  // Spawning — delay shrinks as you survive
+  spawnDelay: 800,
+  spawnDelayMin: 220,
+  spawnRamp: 4,            // ms shaved off the delay per second survived
+
+  // Global difficulty ramp
+  hpRampEvery: 35,         // every N seconds, enemy HP steps up
+  hpRampAmount: 0.45,      // by this fraction of base HP
+  speedRampEvery: 25,
+  speedRampAmount: 0.08,
+  speedRampCap: 0.9,       // max +90% speed
+
+  // Weapon defaults
+  fireDelay: 380,
+  fireDelayMin: 130,       // floor on fire rate — stops the DPS runaway
+  bulletSpeed: 520,
+  damage: 1,
+  // Weapon range is an ELLIPSE, not a circle. The screen is 400x700, so
+  // it's 200px to a side edge but 350px to the top — one radius can't
+  // give both the same margin. These are the half-widths; each leaves
+  // roughly 40px of screen for an alien to cross before you engage it.
+  // Set both to the same value if you'd rather have a circle.
+  rangeX: 160,
+  rangeY: 310,
+  extraShotDamage: 0.6,    // projectiles after the first hit for this fraction
+  slowMs: 1200,            // how long a cryo hit slows an alien
+
+  // Pickups
+  magnetRadius: 130,
+  magnetSpeed: 340,
+
+  // Levelling — next = floor(prev * curve) + flat
+  xpFirstLevel: 8,
+  xpCurve: 1.45,
+  xpFlat: 4,
+
+  // Bosses
+  bossInterval: 60,        // seconds between boss spawns
+  bossShotSpeed: 230,
+  bossHpGrowth: 0.5,       // each boss has this much more HP than the last
+  hiveMinionCap: 12,       // max live swarmlings the Hive can keep on the field
+
+  // Floating joystick
+  stickRadius:   56,       // how far the nub travels = full speed
+  stickNub:      22,
+  stickDeadzone: 9,        // slop before you start moving at all
+  hudSafeY:      96,       // touches above this belong to the HUD, not the stick
+
+  interstitialEvery: 3,     // runs between interstitials
+  restartLockout: 600,
+  cardCount: 3
+};
+
+// UI and projectile colours (these aren't pixel art)
+const COL = {
+  bullet:   0x4fd6e8,
+  bossShot: 0xff4757,
+  core:     0xf1c40f,
+  card:     0x16202a,
+  accent:   0x4fd6e8
+};
+
+// ===============================================================
+// ART
+// Every sprite is drawn at runtime with the canvas 2D context, so
+// there are still no image files. Gradients, rim light and specular
+// highlights are what sell the "shaded 3D" read at these sizes.
+//
+// Each sprite is drawn at SS times its final size and then baked
+// down. That downsample is where the smooth edges come from — it's
+// supersampling, and it costs nothing after load. The final texture
+// is the true display size, so hitboxes and the scale tweens used
+// for hit reactions all keep working unchanged.
+// ===============================================================
+const SS = 3;
+
+// System stack only — no webfont fetch, so it still works offline in
+// the APK. Phaser's default is 'Courier', hence the terminal look.
+const FONT = {
+  display: '"Roboto Condensed", "Arial Narrow", Roboto, Arial, sans-serif',
+  mono:    '"Roboto Mono", "DejaVu Sans Mono", monospace'
+};
+
+const TINT = {
+  suit:     0xdfe7ee,
+  visor:    0x123244,
+  trim:     0xf0932b,
+  drone:    0x7ac74f,
+  runner:   0xff5fa2,
+  brute:    0xb33939,
+  bone:     0xe4d5b7,
+  swarm:    0xa55eea,
+  hive:     0x8b5cf6,
+  sentinel: 0x4a90d9,
+  jugg:     0xe07b39,
+  bullet:   0x4fd6e8,
+  bossShot: 0xff4757,
+  core:     0xf1c40f
+};
+
+function css(n, a) {
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  return a === undefined ? 'rgb(' + r + ',' + g + ',' + b + ')'
+                         : 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+}
+
+function shade(n, f) {
+  const r = Math.min(255, Math.round(((n >> 16) & 255) * f));
+  const g = Math.min(255, Math.round(((n >> 8) & 255) * f));
+  const b = Math.min(255, Math.round((n & 255) * f));
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+
+// A lit sphere: body gradient toward a top-left key light, a cool rim
+// on the opposite edge, then a specular dot. Three passes is the
+// minimum that stops a circle reading as flat.
+function orb(c, cx, cy, r, base) {
+  const g = c.createRadialGradient(cx - r * 0.34, cy - r * 0.40, r * 0.08, cx, cy, r);
+  g.addColorStop(0,    shade(base, 1.65));
+  g.addColorStop(0.45, css(base));
+  g.addColorStop(1,    shade(base, 0.42));
+  c.fillStyle = g;
+  c.beginPath(); c.arc(cx, cy, r, 0, Math.PI * 2); c.fill();
+
+  c.save();
+  c.beginPath(); c.arc(cx, cy, r, 0, Math.PI * 2); c.clip();
+  const rim = c.createRadialGradient(cx + r * 0.55, cy + r * 0.6, r * 0.15,
+                                     cx + r * 0.45, cy + r * 0.5, r * 1.05);
+  rim.addColorStop(0, 'rgba(255,255,255,0.30)');
+  rim.addColorStop(1, 'rgba(255,255,255,0)');
+  c.fillStyle = rim;
+  c.fillRect(cx - r, cy - r, r * 2, r * 2);
+  c.restore();
+
+  const hx = cx - r * 0.36, hy = cy - r * 0.44, hr = r * 0.42;
+  const sp = c.createRadialGradient(hx, hy, 0, hx, hy, hr);
+  sp.addColorStop(0, 'rgba(255,255,255,0.8)');
+  sp.addColorStop(0.5, 'rgba(255,255,255,0.22)');
+  sp.addColorStop(1, 'rgba(255,255,255,0)');
+  c.fillStyle = sp;
+  c.beginPath(); c.arc(hx, hy, hr, 0, Math.PI * 2); c.fill();
+}
+
+// Same treatment, squashed — heads, bodies, visors
+function blob(c, cx, cy, rx, ry, base) {
+  c.save();
+  c.translate(cx, cy);
+  c.scale(1, ry / rx);
+  orb(c, 0, 0, rx, base);
+  c.restore();
+}
+
+function glowDot(c, cx, cy, r, base) {
+  const g = c.createRadialGradient(cx, cy, 0, cx, cy, r);
+  g.addColorStop(0,    'rgba(255,255,255,1)');
+  g.addColorStop(0.32, css(base, 1));
+  g.addColorStop(0.62, css(base, 0.55));
+  g.addColorStop(1,    css(base, 0));
+  c.fillStyle = g;
+  c.beginPath(); c.arc(cx, cy, r, 0, Math.PI * 2); c.fill();
+}
+
+function eye(c, cx, cy, rx, ry) {
+  c.save();
+  c.translate(cx, cy);
+  c.scale(1, ry / rx);
+  const g = c.createRadialGradient(-rx * 0.3, -rx * 0.35, rx * 0.05, 0, 0, rx);
+  g.addColorStop(0, 'rgb(70,80,95)');
+  g.addColorStop(0.6, 'rgb(14,18,24)');
+  g.addColorStop(1, 'rgb(4,6,9)');
+  c.fillStyle = g;
+  c.beginPath(); c.arc(0, 0, rx, 0, Math.PI * 2); c.fill();
+  c.fillStyle = 'rgba(255,255,255,0.85)';
+  c.beginPath(); c.arc(-rx * 0.32, -rx * 0.38, rx * 0.24, 0, Math.PI * 2); c.fill();
+  c.restore();
+}
+
+function plate(c, x, y, w, h, base, round) {
+  const g = c.createLinearGradient(x, y, x, y + h);
+  g.addColorStop(0, shade(base, 1.45));
+  g.addColorStop(0.5, css(base));
+  g.addColorStop(1, shade(base, 0.55));
+  c.fillStyle = g;
+  c.beginPath();
+  if (c.roundRect) c.roundRect(x, y, w, h, round || h * 0.3);
+  else c.rect(x, y, w, h);
+  c.fill();
+}
+
+// Draw big, bake down. `draw` receives the supersampled size.
+function makeSprite(scene, key, size, draw) {
+  const big = document.createElement('canvas');
+  big.width = big.height = size * SS;
+  const bc = big.getContext('2d');
+  draw(bc, size * SS);
+
+  const tex = scene.textures.createCanvas(key, size, size);
+  if (!tex) return;
+  const c = tex.getContext();
+  c.clearRect(0, 0, size, size);
+  c.imageSmoothingEnabled = true;
+  c.imageSmoothingQuality = 'high';
+  c.drawImage(big, 0, 0, size * SS, size * SS, 0, 0, size, size);
+  tex.refresh();
+}
+
+// ===============================================================
+// SOUND — synthesised at runtime with Web Audio. No audio files,
+// which means nothing extra to bundle for the Android build and
+// nothing to download at startup.
+// ===============================================================
+const SFX = (function () {
+  let ctx = null, master = null, noiseBuf = null;
+  const last = {};
+
+  // 0 = everything, 1 = everything except the gun, 2 = silent
+  let level = 0;
+  const LABELS = ['SFX ALL', 'SFX LOW', 'SFX OFF'];
+  const COLOURS = ['#2ecc71', '#00d2d3', '#3d4a56'];
+
+  // The gun fires up to 8x a second, so it gets its own tuning block.
+  // If it still wears on you, drop vol or raise gate.
+  const SHOOT = {
+    freq: 430, to: 210, dur: 0.032, vol: 0.016,
+    wave: 'triangle',   // triangle, not square — square's harmonics are what bite
+    cutoff: 1400,       // shaves off the harsh top end
+    attack: 0.010,      // slow-ish onset kills the click
+    gate: 85            // at high fire rates only every other shot sounds
+  };
+
+  function init() {
+    if (ctx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    ctx = new AC();
+    master = ctx.createGain();
+    master.gain.value = 0.45;
+    master.connect(ctx.destination);
+
+    // One reusable noise buffer — regenerating it per explosion was
+    // measurably expensive once a dozen aliens die in the same frame.
+    const len = Math.floor(ctx.sampleRate * 0.8);
+    noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = noiseBuf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+  }
+
+  function resume() {
+    if (ctx && ctx.state === 'suspended') ctx.resume();
+  }
+
+  // Browsers cap how many sounds can stack before it turns to mush
+  function gate(key, ms) {
+    const now = performance.now();
+    if (last[key] && now - last[key] < ms) return false;
+    last[key] = now;
+    return true;
+  }
+
+  function tone(from, to, dur, vol, type, attack, cutoff) {
+    if (!ctx || level === 2) return;
+    const t = ctx.currentTime;
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.type = type || 'square';
+    o.frequency.setValueAtTime(from, t);
+    if (to) o.frequency.exponentialRampToValueAtTime(Math.max(1, to), t + dur);
+
+    // Ramping up instead of starting at full gain removes the click that
+    // makes a repeated sound grating.
+    const a = Math.min(attack || 0.004, dur * 0.5);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+    o.connect(g);
+    let out = g;
+    if (cutoff) {
+      const f = ctx.createBiquadFilter();
+      f.type = 'lowpass';
+      f.frequency.value = cutoff;
+      g.connect(f);
+      out = f;
+    }
+    out.connect(master);
+    o.start(t); o.stop(t + dur + 0.03);
+  }
+
+  function noise(dur, vol, cutoff) {
+    if (!ctx || level === 2 || !noiseBuf) return;
+    const t = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = noiseBuf;
+    src.playbackRate.value = 0.8 + Math.random() * 0.5;
+    const f = ctx.createBiquadFilter();
+    f.type = 'lowpass';
+    f.frequency.value = cutoff;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(f); f.connect(g); g.connect(master);
+    src.start(t); src.stop(t + dur);
+  }
+
+  return {
+    init: init,
+    resume: resume,
+    label:  function () { return LABELS[level]; },
+    colour: function () { return COLOURS[level]; },
+    cycle:  function () { level = (level + 1) % 3; return level; },
+
+    // Softer, lower, filtered, and it ducks as your fire rate climbs —
+    // a maxed weapon shouldn't be a machine-gun of blips.
+    shoot: function (fireDelay) {
+      if (level !== 0) return;
+      if (!gate('shoot', SHOOT.gate)) return;
+      const duck = Math.max(0.45, Math.min(1, (fireDelay || 380) / 380));
+      tone(SHOOT.freq + Math.random() * 40, SHOOT.to, SHOOT.dur,
+           SHOOT.vol * duck, SHOOT.wave, SHOOT.attack, SHOOT.cutoff);
+    },
+
+    hit:     function () { if (gate('hit', 45))   tone(320, 190, 0.05, 0.05, 'square', 0.004, 2600); },
+    kill:    function () { if (gate('kill', 35))  noise(0.14, 0.11, 1700); },
+    pickup:  function () { if (gate('pick', 30))  tone(1150, 1850, 0.055, 0.04, 'sine'); },
+    hurt:    function () { tone(300, 70, 0.35, 0.2, 'sawtooth'); noise(0.2, 0.12, 700); },
+    select:  function () { tone(520, 780, 0.09, 0.09, 'triangle'); },
+
+    levelUp: function () {
+      tone(660, 660, 0.1, 0.08, 'triangle');
+      setTimeout(function () { tone(880, 880, 0.1, 0.08, 'triangle'); }, 90);
+      setTimeout(function () { tone(1320, 1320, 0.18, 0.09, 'triangle'); }, 180);
+    },
+    bossIn:  function () { tone(130, 52, 1.1, 0.22, 'sawtooth'); noise(0.9, 0.1, 400); },
+    bossDie: function () { noise(0.8, 0.3, 900); tone(220, 40, 0.8, 0.18, 'sawtooth'); },
+    dead:    function () { tone(440, 90, 0.9, 0.2, 'triangle'); }
+  };
+})();
+
+// ===============================================================
+// PARTICLES — one emitter per colour, reused via explode()
+// ===============================================================
+const BURST_COLOURS = {
+  green:  0x7ac74f,   // drones
+  pink:   0xff5fa2,   // runners
+  red:    0xb33939,   // brutes
+  purple: 0xa55eea,   // swarmlings
+  hive:   0x8b5cf6,
+  steel:  0x4a90d9,
+  boss:   0xe07b39,
+  core:   0xf1c40f,
+  hurt:   0xff4757
+};
+let bursts = {};
+
+function makeBursts(scene) {
+  bursts = {};
+  Object.keys(BURST_COLOURS).forEach(function (key) {
+    bursts[key] = scene.add.particles(0, 0, 'spark', {
+      speed:     { min: 50, max: 200 },
+      lifespan:  { min: 220, max: 460 },
+      scale:     { start: 0.9, end: 0 },
+      alpha:     { start: 1, end: 0 },
+      tint:      BURST_COLOURS[key],
+      blendMode: 'ADD',
+      emitting:  false
+    }).setDepth(40);
+  });
+}
+
+function burst(key, x, y, count) {
+  const e = bursts[key];
+  if (e) e.explode(count, x, y);
+}
+
+// A white silhouette of whatever just died, expanding and fading. Makes
+// a kill read clearly even when the screen is full of particles.
+function deathPop(scene, textureKey, x, y, grow, ms) {
+  const ghost = scene.add.image(x, y, textureKey).setDepth(45);
+  ghost.setTintFill(0xffffff);
+  scene.tweens.add({
+    targets: ghost,
+    scale: grow,
+    alpha: 0,
+    duration: ms,
+    ease: 'Quad.easeOut',
+    onComplete: () => ghost.destroy()
+  });
+}
+
+// ===============================================================
+// ENEMY TYPES — unlock by survival time, picked by weight
+// ===============================================================
+const ENEMY_TYPES = [
+  { id:'drone',  texture:'e_drone',  burst:'green',  unlockAt:0,   weight:10, hp:1, speed:110, radius:12, cores:1, cluster:1 },
+  { id:'runner', texture:'e_runner', burst:'pink',   unlockAt:30,  weight:7,  hp:1, speed:200, radius:8,  cores:1, cluster:1 },
+  { id:'brute',  texture:'e_brute',  burst:'red',    unlockAt:75,  weight:4,  hp:8, speed:68,  radius:20, cores:4, cluster:1 },
+  { id:'swarm',  texture:'e_swarm',  burst:'purple', unlockAt:120, weight:5,  hp:1, speed:155, radius:7,  cores:1, cluster:5 }
+];
+
+// ===============================================================
+// BOSSES — cycled in order, HP scales with how many have spawned
+// ===============================================================
+const BOSSES = [
+  {
+    id:'hive', name:'HIVE MOTHER', texture:'b_hive', burst:'hive', radius:34, hp:55, speed:55, cores:12,
+    cooldown:2600,
+    ability: (scene, boss) => {           // vomits swarmlings, up to a cap
+      const live = enemies.getChildren()
+        .filter(e => e.active && e.getData('fromHive')).length;
+      if (live >= CFG.hiveMinionCap) return;
+
+      // Visible contraction, so the birth reads as caused by the boss
+      scene.tweens.killTweensOf(boss);
+      boss.setScale(1.16);
+      scene.tweens.add({ targets: boss, scale: 1, duration: 260, ease: 'Back.easeOut' });
+
+      for (let i = 0; i < 3; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const m = spawnEnemyOfType(ENEMY_TYPES[3],
+          boss.x + Math.cos(a) * 45, boss.y + Math.sin(a) * 45);
+        m.setData('fromHive', true);
+      }
+    },
+    move: (scene, boss) => scene.physics.moveToObject(boss, player, effSpeed(scene, boss))
+  },
+  {
+    id:'sentinel', name:'RAIL SENTINEL', texture:'b_sentinel', burst:'steel', radius:28, hp:48, speed:120, cores:12,
+    cooldown:1500,
+    ability: (scene, boss) => {           // three-round burst at the player
+      scene.tweens.killTweensOf(boss);
+      boss.setScale(0.86);                // recoil
+      scene.tweens.add({ targets: boss, scale: 1, duration: 220, ease: 'Back.easeOut' });
+
+      for (let i = -1; i <= 1; i++) {
+        const shot = bossShots.create(boss.x, boss.y, 'bossShot');
+        shot.setCircle(8);
+        const ang = Phaser.Math.Angle.Between(boss.x, boss.y, player.x, player.y)
+                  + Phaser.Math.DegToRad(i * 12);
+        scene.physics.velocityFromRotation(ang, CFG.bossShotSpeed, shot.body.velocity);
+      }
+    },
+    move: (scene, boss) => {              // holds range instead of closing
+      // These must stay inside CFG.rangeX (the tighter axis) or it kites you
+      const s = effSpeed(scene, boss);
+      const d = Phaser.Math.Distance.Between(boss.x, boss.y, player.x, player.y);
+      if (d < 100)      scene.physics.moveToObject(boss, player, -s);
+      else if (d > 140) scene.physics.moveToObject(boss, player, s);
+      else              boss.setVelocity(0);
+    }
+  },
+  {
+    id:'juggernaut', name:'JUGGERNAUT', texture:'b_jugg', burst:'boss', radius:40, hp:95, speed:45, cores:16,
+    cooldown:3200,
+    ability: (scene, boss) => {           // telegraphed charge
+      boss.setData('charging', true);
+      boss.setTintFill(0xffffff);
+
+      // Swells during the wind-up so you can see the charge coming
+      scene.tweens.killTweensOf(boss);
+      scene.tweens.add({ targets: boss, scale: 1.18, duration: 480, ease: 'Quad.easeIn' });
+
+      scene.time.delayedCall(500, () => {
+        if (!boss.active) return;
+        boss.clearTint();
+        scene.tweens.killTweensOf(boss);
+        scene.tweens.add({ targets: boss, scale: 1, duration: 130, ease: 'Quad.easeOut' });
+        const ang = Phaser.Math.Angle.Between(boss.x, boss.y, player.x, player.y);
+        scene.physics.velocityFromRotation(ang, 480, boss.body.velocity);
+        scene.time.delayedCall(900, () => {
+          if (boss.active) boss.setData('charging', false);
+        });
+      });
+    },
+    move: (scene, boss) => {
+      if (boss.getData('charging')) return;   // committed to the dash
+      scene.physics.moveToObject(boss, player, effSpeed(scene, boss));
+    }
+  }
+];
+
+// ===============================================================
+// UPGRADES
+// ===============================================================
+// `offensive: true` marks a true DPS upgrade. Every level-up is guaranteed
+// to offer at least one, so you can never draw four utility screens in a
+// row and walk into a boss with a starting weapon.
+// `weight` is relative draw chance among the rest.
+const UPGRADES = [
+  { id:'dmg',    name:'PLASMA CHARGE',      desc:'+1 damage per shot',        max:6, weight:3, offensive:true,
+    apply: () => { stats.damage += 1; } },
+
+  { id:'fire',   name:'OVERCLOCKED COILS',  desc:'Fire 15% faster',           max:6, weight:3, offensive:true,
+    apply: (s) => { stats.fireDelay = Math.max(CFG.fireDelayMin, Math.round(stats.fireDelay * 0.85)); rebuildFireTimer(s); } },
+
+  { id:'split',  name:'SPLIT EMITTER',      desc:'+1 projectile (extras hit softer)', max:3, weight:2, offensive:true,
+    apply: () => { stats.projectiles += 1; } },
+
+  { id:'phase',  name:'PHASE ROUNDS',       desc:'Pierce 1 extra alien',      max:3, weight:1.5,
+    apply: () => { stats.pierce += 1; } },
+
+  { id:'range',  name:'TARGETING ARRAY',    desc:'+22% weapon range',        max:4, weight:1.4,
+    apply: () => { stats.rangeX = Math.round(stats.rangeX * 1.22);
+                   stats.rangeY = Math.round(stats.rangeY * 1.22); } },
+
+  { id:'cryo',   name:'CRYO ROUNDS',        desc:'Hits slow aliens by 20%',   max:3, weight:1.5,
+    apply: () => { stats.slow = Math.min(0.6, stats.slow + 0.2); } },
+
+  { id:'damp',   name:'INERTIAL DAMPENERS', desc:'Move 12% faster',           max:6, weight:1.2,
+    apply: () => { stats.moveSpeed = Math.round(stats.moveSpeed * 1.12); } },
+
+  { id:'salv',   name:'SALVAGE FIELD',      desc:'+40% core pickup range',    max:5, weight:1,
+    apply: () => { stats.magnetRadius = Math.round(stats.magnetRadius * 1.4); } },
+
+  { id:'refine', name:'CORE REFINERY',      desc:'Cores are worth +1 XP',     max:3, weight:1.5,
+    apply: () => { stats.xpGain += 1; } },
+
+  { id:'hull',   name:'REINFORCED HULL',    desc:'+1 max hull, heals 1',      max:3, weight:1.5,
+    apply: () => { stats.maxHp += 1; stats.hp = Math.min(stats.maxHp, stats.hp + 1); } },
+
+  { id:'repair', name:'FIELD REPAIR',       desc:'Restore 2 hull',            max:99, weight:2,
+    apply: () => { stats.hp = Math.min(stats.maxHp, stats.hp + 2); } }
+];
+
+const FALLBACK = { id:'reserve', name:'EMERGENCY RESERVES', desc:'Move 8% faster', max:999, weight:1,
+  apply: () => { stats.moveSpeed = Math.round(stats.moveSpeed * 1.08); } };
+
+// ===============================================================
+// HIGH SCORES
+// localStorage can be unavailable — private browsing, some in-app
+// webviews, storage disabled. Every call is guarded, and the game
+// falls back to session-only scores rather than crashing.
+// ===============================================================
+const SAVE_KEY = 'ultimate-survivor-best';
+const EMPTY_BEST = { time: 0, level: 0, bosses: 0, runs: 0 };
+let storageOK = true;
+
+function loadBest() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    storageOK = true;
+    return raw ? Object.assign({}, EMPTY_BEST, JSON.parse(raw)) : Object.assign({}, EMPTY_BEST);
+  } catch (e) {
+    storageOK = false;
+    return Object.assign({}, EMPTY_BEST);
+  }
+}
+
+function saveBest(b) {
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify(b));
+    storageOK = true;
+  } catch (e) {
+    storageOK = false;   // keep it in memory for this session
+  }
+}
+
+let best = loadBest();
+
+// ===============================================================
+// PREFERENCES — kept apart from scores so a corrupt blob in one
+// can't take out the other.
+// ===============================================================
+const PREF_KEY = 'ultimate-survivor-prefs';
+const DEFAULT_PREFS = { controls: 'stick', runsSinceAd: 0 };
+
+function loadPrefs() {
+  try {
+    return Object.assign({}, DEFAULT_PREFS,
+      JSON.parse(localStorage.getItem(PREF_KEY) || '{}'));
+  } catch (e) {
+    return Object.assign({}, DEFAULT_PREFS);
+  }
+}
+
+function savePrefs() {
+  try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch (e) {}
+}
+
+let prefs = loadPrefs();
+
+// ===============================================================
+// ADS
+// A facade over the Capacitor AdMob plugin. Three rules:
+//   1. In a browser there is no plugin, so every call is a no-op and
+//      the game plays exactly as it does now. Nothing here can break
+//      the fast Chrome test loop.
+//   2. Every native call is wrapped. A wrong method name, a network
+//      failure or a plugin version change degrades to "no ad" rather
+//      than a crash.
+//   3. The game never awaits an ad. Callbacks only.
+//
+// No bundler here, so the plugin is reached via window.Capacitor.Plugins
+// rather than an import.
+// ===============================================================
+
+// Google's public test units. Swap for your real IDs and set
+// AD_TESTING to false only when you're ready to ship — live ads on
+// your own device is how AdMob accounts get suspended.
+const AD_TESTING = true;
+const AD_UNITS = {
+  rewarded:     'ca-app-pub-3940256099942544/5224354917',
+  interstitial: 'ca-app-pub-3940256099942544/1033173712'
+};
+
+// With no plugin present, pretend ads work so the whole flow can be
+// tested in a browser. Set false to see exactly what a user with no
+// ad fill would get.
+const AD_SIMULATE_IN_BROWSER = true;
+
+const Ads = (function () {
+  let plugin = null;
+  let ready = false;
+  let busy = false;
+  let simulated = false;
+
+  function find() {
+    try {
+      return (window.Capacitor &&
+              window.Capacitor.Plugins &&
+              window.Capacitor.Plugins.AdMob) || null;
+    } catch (e) { return null; }
+  }
+
+  function safe(fn) {
+    try { return fn(); } catch (e) { return null; }
+  }
+
+  function preload() {
+    if (!plugin || !ready) return;
+    safe(() => plugin.prepareRewardVideoAd(
+      { adId: AD_UNITS.rewarded, isTesting: AD_TESTING }).catch(() => {}));
+    safe(() => plugin.prepareInterstitial(
+      { adId: AD_UNITS.interstitial, isTesting: AD_TESTING }).catch(() => {}));
+  }
+
+  return {
+    init: function () {
+      plugin = find();
+      if (!plugin) {
+        simulated = AD_SIMULATE_IN_BROWSER;
+        return;
+      }
+      safe(() => plugin.initialize({ initializeForTesting: AD_TESTING })
+        .then(() => { ready = true; preload(); })
+        .catch(() => { ready = false; }));
+    },
+
+    // Whether it's worth drawing an ad button at all
+    available: function () {
+      return (plugin && ready) || simulated;
+    },
+
+    // onReward fires only if the user actually earned it.
+    // onSkip fires for every other outcome, including errors.
+    rewarded: function (scene, onReward, onSkip) {
+      if (busy || !this.available()) { onSkip(); return; }
+      busy = true;
+
+      const finish = (earned) => {
+        busy = false;
+        preload();
+        if (earned) onReward(); else onSkip();
+      };
+
+      if (!plugin) {                      // browser stub
+        scene.time.delayedCall(700, () => finish(true));
+        return;
+      }
+
+      const call = safe(() => plugin.showRewardVideoAd());
+      if (!call || !call.then) { finish(false); return; }
+      call.then((item) => finish(!!item)).catch(() => finish(false));
+    },
+
+    // Fire and forget — never gates anything the player is waiting on
+    interstitial: function () {
+      if (busy || !plugin || !ready) return;
+      busy = true;
+      const call = safe(() => plugin.showInterstitial());
+      const done = () => { busy = false; preload(); };
+      if (call && call.then) call.then(done).catch(done);
+      else done();
+    }
+  };
+})();
+
+// ===============================================================
+// META-PROGRESSION
+// Salvage banks across runs and buys permanent upgrades. Own storage
+// key again, so a bad write here can't cost you your high scores.
+// ===============================================================
+const META_KEY = 'ultimate-survivor-meta';
+const DEFAULT_META = { salvage: 0, owned: {} };
+
+// costs[] length is also the max level, so adding a tier is one number
+const META_UPGRADES = [
+  { id:'hull',   name:'REINFORCED PLATING', desc:'+1 hull at run start',      costs:[150, 400, 900] },
+  { id:'dmg',    name:'PRE-LOADED CHARGE',  desc:'+1 damage at run start',    costs:[200, 500, 1100] },
+  { id:'coils',  name:'TUNED COILS',        desc:'Start 8% faster firing',    costs:[120, 280, 600, 1200] },
+  { id:'mag',    name:'SALVAGE MAGNET',     desc:'+15% core pickup range',    costs:[80, 180, 380, 700] },
+  { id:'proc',   name:'CORE PROCESSOR',     desc:'+8% salvage earned',        costs:[100, 220, 460, 900, 1700] },
+  { id:'beacon', name:'EMERGENCY BEACON',   desc:'Revive once per run',       costs:[1500] }
+];
+
+function loadMeta() {
+  try {
+    const m = Object.assign({}, DEFAULT_META,
+      JSON.parse(localStorage.getItem(META_KEY) || '{}'));
+    m.owned = m.owned || {};
+    return m;
+  } catch (e) {
+    return { salvage: 0, owned: {} };
+  }
+}
+
+function saveMeta() {
+  try { localStorage.setItem(META_KEY, JSON.stringify(meta)); } catch (e) {}
+}
+
+let meta = loadMeta();
+
+function metaLevel(id) { return meta.owned[id] || 0; }
+
+// Returns true if this run beat the record
+function recordRun(time, level, bosses) {
+  best.runs = (best.runs || 0) + 1;
+  const beat = time > (best.time || 0);
+  if (beat) {
+    best.time = time;
+    best.level = level;
+    best.bosses = bosses;
+  }
+  saveBest(best);
+  return beat;
+}
+
+// ===============================================================
+// SCREEN WAKE LOCK
+// Android will dim and sleep the screen during a run, because drag
+// input doesn't count as user activity for the idle timer. Guarded
+// throughout — unsupported or denied is not an error worth surfacing.
+// ===============================================================
+let wakeLock = null;
+
+function requestWake() {
+  try {
+    if (!('wakeLock' in navigator) || wakeLock) return;
+    navigator.wakeLock.request('screen').then(lock => {
+      wakeLock = lock;
+      lock.addEventListener('release', () => { wakeLock = null; });
+    }).catch(() => {});
+  } catch (e) { /* not supported */ }
+}
+
+function releaseWake() {
+  try {
+    if (wakeLock) { wakeLock.release(); wakeLock = null; }
+  } catch (e) { /* already gone */ }
+}
+
+// ===============================================================
+// BACKGROUND
+// Three star layers at different sizes, speeds and brightness. The
+// depth read comes from them moving at different rates, not from any
+// single layer looking good on its own.
+// ===============================================================
+const STAR_LAYERS = [
+  { n: 40, size: [0.6, 1.2], speed: [4, 9],   alpha: [0.16, 0.30], par: 0.02 },
+  { n: 24, size: [1.0, 1.8], speed: [11, 20], alpha: [0.32, 0.52], par: 0.05 },
+  { n: 12, size: [1.7, 2.7], speed: [24, 40], alpha: [0.55, 0.85], par: 0.10 }
+];
+
+// Real starfields aren't white. A few tinted stars is the difference
+// between "dots" and "sky".
+const STAR_TINTS = [0xffffff, 0xffffff, 0xffffff, 0xcfe4ff, 0xbcd4ff, 0xffe6c4, 0xffd2dc];
+
+function rng(a, b) { return a + Math.random() * (b - a); }
+
+function makeStarfield(density) {
+  const d = density === undefined ? 1 : density;
+  return STAR_LAYERS.map(L => {
+    const stars = [];
+    for (let i = 0; i < Math.round(L.n * d); i++) {
+      stars.push({
+        // spread wider than the screen so parallax can't expose an edge
+        x: rng(-30, CFG.width + 30),
+        y: Math.random() * CFG.height,
+        s: rng(L.size[0], L.size[1]),
+        v: rng(L.speed[0], L.speed[1]),
+        a: rng(L.alpha[0], L.alpha[1]),
+        c: STAR_TINTS[(Math.random() * STAR_TINTS.length) | 0],
+        tw: rng(0.6, 1.9),
+        ph: Math.random() * Math.PI * 2
+      });
+    }
+    return { par: L.par, stars: stars };
+  });
+}
+
+// px/py are the player's offset from centre; each layer shifts by a
+// fraction of it, so moving the ship pushes the sky the other way.
+function drawStars(gfx, field, delta, time, px, py) {
+  gfx.clear();
+  const dt = delta / 1000;
+  const ox = px || 0, oy = py || 0;
+  const t = (time || 0) * 0.002;
+
+  for (let L = 0; L < field.length; L++) {
+    const layer = field[L];
+    const shiftX = ox * layer.par, shiftY = oy * layer.par;
+    for (let i = 0; i < layer.stars.length; i++) {
+      const st = layer.stars[i];
+      st.y += st.v * dt;
+      if (st.y > CFG.height + 4) {
+        st.y -= CFG.height + 8;
+        st.x = rng(-30, CFG.width + 30);
+      }
+      const tw = 0.78 + Math.sin(t * st.tw + st.ph) * 0.22;
+      // fillRect not fillCircle — at 1-2px they're identical on screen,
+      // and rects skip the arc triangulation every single frame
+      gfx.fillStyle(st.c, st.a * tw);
+      gfx.fillRect(st.x - shiftX, st.y - shiftY, st.s, st.s);
+    }
+  }
+}
+
+// Slow colour washes. Three layers at different speeds so they drift
+// through each other instead of moving as one sheet.
+function addNebula(scene) {
+  [{ x: 110, y: 180, s: 2.6, a: 0.46, d: 47000, dx:  80, dy: -60 },
+   { x: 310, y: 480, s: 3.2, a: 0.34, d: 68000, dx: -70, dy:  55 },
+   { x: 200, y: 690, s: 2.2, a: 0.28, d: 55000, dx:  50, dy: -90 }].forEach(n => {
+    const img = scene.add.image(n.x, n.y, 'nebula')
+      .setScale(n.s).setAlpha(n.a).setDepth(-24).setBlendMode('ADD');
+    scene.tweens.add({
+      targets: img, x: n.x + n.dx, y: n.y + n.dy, angle: 20,
+      duration: n.d, yoyo: true, repeat: -1, ease: 'Sine.easeInOut'
+    });
+  });
+}
+
+// A planet gives the scene scale. Mostly off-screen on purpose — a
+// whole disc floating in the middle would compete with the game.
+function addPlanet(scene) {
+  const p = scene.add.image(-34, 638, 'planet')
+    .setScale(1.5).setAlpha(0.75).setDepth(-16);
+  scene.tweens.add({
+    targets: p, y: 596, angle: 8,
+    duration: 90000, yoyo: true, repeat: -1, ease: 'Sine.easeInOut'
+  });
+}
+
+// Sits BELOW the sprites, not above. It frames the screen without
+// dimming aliens as they come in from the edges — which would undo
+// the whole point of the weapon range change.
+function addVignette(scene) {
+  scene.add.image(CFG.width / 2, CFG.height / 2, 'vignette')
+    .setDisplaySize(CFG.width * 1.05, CFG.height * 1.05)
+    .setAlpha(0.7).setDepth(-14);
+}
+
+function addBackground(scene) {
+  addNebula(scene);
+  addPlanet(scene);
+  addVignette(scene);
+  addBloom(scene);
+}
+
+// WebGL only. Phaser.AUTO falls back to Canvas on old devices, where
+// postFX doesn't exist — so this is guarded rather than assumed.
+function addBloom(scene) {
+  try {
+    if (scene.renderer && scene.renderer.type === Phaser.WEBGL &&
+        scene.cameras.main.postFX) {
+      scene.cameras.main.postFX.addBloom(0xffffff, 1, 1, 1, 0.85, 4);
+    }
+  } catch (e) { /* no bloom, still perfectly playable */ }
+}
+
+const config = {
+  type: Phaser.AUTO,
+  scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH,
+           width: CFG.width, height: CFG.height },
+  physics: { default:'arcade', arcade:{ gravity:{ y:0 }, debug:false } },
+  scene: [
+    { key: 'Splash', active: true,  preload: preload, create: splashCreate },
+    { key: 'Title', active: false, preload: preload, create: titleCreate, update: titleUpdate },
+    { key: 'Shop',  active: false, preload: preload, create: shopCreate,  update: shopUpdate },
+    { key: 'Game',  active: false, preload: preload, create: create,      update: update }
+  ]
+};
+
+const game = new Phaser.Game(config);
+
+// Runtime state
+let player, enemies, bullets, gems, bossShots;
+let cursors, wasd, fireTimer, hpGfx;
+let hudText, hullText, bossBarGfx, bossNameText, rangeGfx, hudGfx;
+let score = 0, playerLevel = 1, xp = 0, xpToNextLevel = CFG.xpFirstLevel;
+let isGameOver = false, isPaused = false, canRestart = false;
+let stats, taken, spawnAccum = 0, bossCount = 0, activeBoss = null, invulnUntil = 0;
+let stars = [], starGfx, uiCapture = false;
+let runCores = 0, bossAura = null;
+let usedAdRevive = false, doubledSalvage = false;
+let stickGfx, stick = { active: false, id: null, ox: 0, oy: 0, nx: 0, ny: 0, dx: 0, dy: 0, mag: 0 };
+
+function resetStick() {
+  stick.active = false; stick.id = null;
+  stick.dx = 0; stick.dy = 0; stick.mag = 0;
+}
+
+function resetRun() {
+  score = 0; playerLevel = 1; xp = 0;
+  xpToNextLevel = CFG.xpFirstLevel;
+  isGameOver = false; isPaused = false; canRestart = false;
+  spawnAccum = 0; bossCount = 0; activeBoss = null; invulnUntil = 0;
+  runCores = 0;
+  bossAura = null;
+  usedAdRevive = false;
+  doubledSalvage = false;
+
+  meta = loadMeta();
+  const hull = CFG.playerMaxHp + metaLevel('hull');
+
+  stats = {
+    hp:           hull,
+    maxHp:        hull,
+    damage:       CFG.damage + metaLevel('dmg'),
+    fireDelay:    Math.max(CFG.fireDelayMin,
+                    Math.round(CFG.fireDelay * Math.pow(0.92, metaLevel('coils')))),
+    projectiles:  1,
+    bulletSpeed:  CFG.bulletSpeed,
+    rangeX:       CFG.rangeX,
+    rangeY:       CFG.rangeY,
+    pierce:       0,
+    slow:         0,
+    moveSpeed:    CFG.playerSpeed,
+    magnetRadius: Math.round(CFG.magnetRadius * (1 + 0.15 * metaLevel('mag'))),
+    xpGain:       1,
+    revives:      metaLevel('beacon')
+  };
+  taken = {};
+}
+
+// Difficulty multipliers derived from survival time
+function hpScale()    { return 1 + Math.floor(score / CFG.hpRampEvery) * CFG.hpRampAmount; }
+function speedScale() { return 1 + Math.min(Math.floor(score / CFG.speedRampEvery) * CFG.speedRampAmount, CFG.speedRampCap); }
+function spawnDelay() { return Math.max(CFG.spawnDelayMin, CFG.spawnDelay - score * CFG.spawnRamp); }
+
+// An enemy's current speed, after any cryo slow. Bosses use this too.
+function effSpeed(scene, e) {
+  const base = e.getData('speed');
+  if (stats.slow > 0 && scene.time.now < (e.getData('slowUntil') || 0)) {
+    return base * (1 - stats.slow);
+  }
+  return base;
+}
+
+// ===============================================================
+function preload() {
+  if (this.textures.exists('player')) return;
+  const S = this;
+
+  // --- Astronaut
+  makeSprite(S, 'player', 32, (c, n) => {
+    const u = n / 32;
+    // torso
+    plate(c, 9 * u, 17 * u, 14 * u, 12 * u, TINT.suit, 4 * u);
+    // legs
+    plate(c, 10.5 * u, 25 * u, 4.5 * u, 6 * u, 0xb9c4cf, 2 * u);
+    plate(c, 17 * u, 25 * u, 4.5 * u, 6 * u, 0xb9c4cf, 2 * u);
+    // shoulder pads
+    plate(c, 5.5 * u, 18 * u, 5 * u, 8 * u, TINT.trim, 2.4 * u);
+    plate(c, 21.5 * u, 18 * u, 5 * u, 8 * u, TINT.trim, 2.4 * u);
+    // helmet
+    orb(c, 16 * u, 12 * u, 9.2 * u, TINT.suit);
+    // visor
+    blob(c, 16 * u, 12.4 * u, 6.6 * u, 5.4 * u, TINT.visor);
+    // visor sheen — a hard diagonal streak reads as glass
+    c.save();
+    c.beginPath();
+    c.ellipse(16 * u, 12.4 * u, 6.6 * u, 5.4 * u, 0, 0, Math.PI * 2);
+    c.clip();
+    const sh = c.createLinearGradient(10 * u, 8 * u, 20 * u, 16 * u);
+    sh.addColorStop(0, 'rgba(120,235,255,0.55)');
+    sh.addColorStop(0.45, 'rgba(120,235,255,0.05)');
+    sh.addColorStop(1, 'rgba(120,235,255,0)');
+    c.fillStyle = sh;
+    c.fillRect(8 * u, 6 * u, 16 * u, 14 * u);
+    c.restore();
+  });
+
+  // --- Drone: classic grey alien, glossy
+  makeSprite(S, 'e_drone', 24, (c, n) => {
+    const u = n / 24;
+    blob(c, 12 * u, 17 * u, 5 * u, 6 * u, shade(TINT.drone, 0.75));
+    blob(c, 12 * u, 9.5 * u, 9 * u, 8 * u, TINT.drone);
+    eye(c, 8.4 * u, 10 * u, 2.5 * u, 3.4 * u);
+    eye(c, 15.6 * u, 10 * u, 2.5 * u, 3.4 * u);
+  });
+
+  // --- Runner: fast, pointed, magenta
+  makeSprite(S, 'e_runner', 16, (c, n) => {
+    const u = n / 16;
+    blob(c, 8 * u, 8 * u, 7 * u, 5.5 * u, TINT.runner);
+    eye(c, 5.8 * u, 7 * u, 1.6 * u, 2 * u);
+    eye(c, 10.2 * u, 7 * u, 1.6 * u, 2 * u);
+  });
+
+  // --- Brute: armoured hulk with a bone chest plate
+  makeSprite(S, 'e_brute', 40, (c, n) => {
+    const u = n / 40;
+    orb(c, 20 * u, 20 * u, 19 * u, TINT.brute);
+    c.save();
+    c.beginPath(); c.arc(20 * u, 20 * u, 19 * u, 0, Math.PI * 2); c.clip();
+    plate(c, 9 * u, 21 * u, 22 * u, 9 * u, TINT.bone, 3 * u);
+    c.restore();
+    eye(c, 13 * u, 14 * u, 3.2 * u, 3.6 * u);
+    eye(c, 27 * u, 14 * u, 3.2 * u, 3.6 * u);
+  });
+
+  // --- Swarmling
+  makeSprite(S, 'e_swarm', 14, (c, n) => {
+    const u = n / 14;
+    orb(c, 7 * u, 7 * u, 6.5 * u, TINT.swarm);
+    eye(c, 7 * u, 6.4 * u, 2.4 * u, 2.8 * u);
+  });
+
+  // --- Hive Mother: bloated queen, sacs across the middle
+  makeSprite(S, 'b_hive', 68, (c, n) => {
+    const u = n / 68;
+    orb(c, 34 * u, 34 * u, 33 * u, TINT.hive);
+    c.save();
+    c.beginPath(); c.arc(34 * u, 34 * u, 33 * u, 0, Math.PI * 2); c.clip();
+    for (let i = 0; i < 5; i++) {
+      orb(c, (12 + i * 11) * u, (40 + (i % 2) * 7) * u, 7 * u, shade(TINT.hive, 0.55));
+    }
+    c.restore();
+    eye(c, 23 * u, 21 * u, 5.5 * u, 6.5 * u);
+    eye(c, 45 * u, 21 * u, 5.5 * u, 6.5 * u);
+  });
+
+  // --- Rail Sentinel: machined shell around a hot core
+  makeSprite(S, 'b_sentinel', 56, (c, n) => {
+    const u = n / 56;
+    orb(c, 28 * u, 28 * u, 27 * u, TINT.sentinel);
+    c.save();
+    c.beginPath(); c.arc(28 * u, 28 * u, 27 * u, 0, Math.PI * 2); c.clip();
+    c.strokeStyle = 'rgba(10,20,32,0.55)';
+    c.lineWidth = 2.2 * u;
+    [10, 17, 24].forEach(r => {
+      c.beginPath(); c.arc(28 * u, 28 * u, r * u, 0, Math.PI * 2); c.stroke();
+    });
+    c.restore();
+    glowDot(c, 28 * u, 28 * u, 13 * u, TINT.bullet);
+  });
+
+  // --- Juggernaut: heavy armour, banded plate
+  makeSprite(S, 'b_jugg', 80, (c, n) => {
+    const u = n / 80;
+    orb(c, 40 * u, 40 * u, 39 * u, TINT.jugg);
+    c.save();
+    c.beginPath(); c.arc(40 * u, 40 * u, 39 * u, 0, Math.PI * 2); c.clip();
+    plate(c, 4 * u, 42 * u, 72 * u, 16 * u, TINT.bone, 5 * u);
+    plate(c, 4 * u, 62 * u, 72 * u, 10 * u, shade(TINT.jugg, 0.55), 4 * u);
+    c.restore();
+    eye(c, 26 * u, 26 * u, 6 * u, 6.5 * u);
+    eye(c, 54 * u, 26 * u, 6 * u, 6.5 * u);
+  });
+
+  // --- Projectiles and pickups: soft falloff reads as emissive
+  makeSprite(S, 'bullet',   14, (c, n) => glowDot(c, n / 2, n / 2, n / 2, TINT.bullet));
+  makeSprite(S, 'bossShot', 16, (c, n) => glowDot(c, n / 2, n / 2, n / 2, TINT.bossShot));
+  makeSprite(S, 'spark',     8, (c, n) => glowDot(c, n / 2, n / 2, n / 2, 0xffffff));
+
+  // --- XP core: faceted crystal
+  makeSprite(S, 'gem', 14, (c, n) => {
+    const u = n / 14, m = n / 2;
+    const g = c.createLinearGradient(0, 0, n, n);
+    g.addColorStop(0, shade(TINT.core, 1.6));
+    g.addColorStop(0.5, css(TINT.core));
+    g.addColorStop(1, shade(TINT.core, 0.5));
+    c.fillStyle = g;
+    c.beginPath();
+    c.moveTo(m, 0.5 * u); c.lineTo(n - 0.5 * u, m);
+    c.lineTo(m, n - 0.5 * u); c.lineTo(0.5 * u, m);
+    c.closePath(); c.fill();
+    c.fillStyle = 'rgba(255,255,255,0.55)';
+    c.beginPath();
+    c.moveTo(m, 1.5 * u); c.lineTo(m + 3.5 * u, m); c.lineTo(m, m); c.closePath();
+    c.fill();
+  });
+
+  // --- Fateful Games mark: segmented wheel with a gap
+  makeSprite(S, 'fg_wheel', 168, (c, n) => {
+    const m = n / 2, r = n * 0.40;
+    c.lineCap = 'butt';
+    c.strokeStyle = css(0xf0c000);
+    c.lineWidth = n * 0.085;
+    // ten segments, one omitted to leave the signature gap
+    for (let i = 0; i < 10; i++) {
+      if (i === 7) continue;
+      const a0 = (i / 10) * Math.PI * 2 + 0.035;
+      const a1 = ((i + 1) / 10) * Math.PI * 2 - 0.035;
+      c.beginPath(); c.arc(m, m, r, a0, a1); c.stroke();
+    }
+    c.strokeStyle = css(0xf2620f, 0.55);
+    c.lineWidth = n * 0.018;
+    c.beginPath(); c.arc(m, m, r * 0.78, 0, Math.PI * 2); c.stroke();
+  });
+
+  makeSprite(S, 'fg_arc', 200, (c, n) => {
+    const m = n / 2;
+    c.strokeStyle = css(0xf0c000);
+    c.lineWidth = n * 0.012;
+    c.beginPath(); c.arc(m, m, n * 0.45, 0.25, Math.PI * 1.45); c.stroke();
+  });
+
+  makeSprite(S, 'fg_die', 76, (c, n) => {
+    const pad = n * 0.14, w = n - pad * 2, r = n * 0.17;
+    plate(c, pad, pad, w, w, 0xf4efe4, r);
+    c.fillStyle = css(0x1a1526);
+    const p = (fx, fy) => {
+      c.beginPath();
+      c.arc(pad + w * fx, pad + w * fy, n * 0.055, 0, Math.PI * 2);
+      c.fill();
+    };
+    [[0.26,0.26],[0.74,0.26],[0.5,0.5],[0.26,0.74],[0.74,0.74]].forEach(q => p(q[0], q[1]));
+  });
+
+  // --- Planet: scale reference, mostly off-screen
+  makeSprite(S, 'planet', 200, (c, n) => {
+    const r = n * 0.44, m = n / 2;
+    orb(c, m, m, r, 0x2f4d7d);
+    c.save();
+    c.beginPath(); c.arc(m, m, r, 0, Math.PI * 2); c.clip();
+    // banding, so it isn't just a blue ball
+    [[0.30, 0.16, 'rgba(18,40,72,0.55)'],
+     [0.62, 0.11, 'rgba(96,150,210,0.22)'],
+     [0.82, 0.09, 'rgba(18,40,72,0.40)']].forEach(band => {
+      c.fillStyle = band[2];
+      c.beginPath();
+      c.ellipse(m, m - r + n * band[0], r * 1.1, n * band[1], 0, 0, Math.PI * 2);
+      c.fill();
+    });
+    c.restore();
+    const halo = c.createRadialGradient(m, m, r * 0.95, m, m, r * 1.16);
+    halo.addColorStop(0, 'rgba(130,195,255,0.40)');
+    halo.addColorStop(1, 'rgba(130,195,255,0)');
+    c.fillStyle = halo;
+    c.beginPath(); c.arc(m, m, r * 1.16, 0, Math.PI * 2); c.fill();
+  });
+
+  // --- Vignette
+  makeSprite(S, 'vignette', 256, (c, n) => {
+    const g = c.createRadialGradient(n / 2, n / 2, n * 0.20, n / 2, n / 2, n * 0.56);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(0.6, 'rgba(0,0,0,0.30)');
+    g.addColorStop(1, 'rgba(0,0,0,0.80)');
+    c.fillStyle = g;
+    c.fillRect(0, 0, n, n);
+  });
+
+  // --- Nebula wash for the background
+  makeSprite(S, 'nebula', 256, (c, n) => {
+    const puff = (x, y, r, col) => {
+      const g = c.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, col);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      c.fillStyle = g;
+      c.fillRect(0, 0, n, n);
+    };
+    puff(n * 0.32, n * 0.34, n * 0.42, 'rgba(120,70,220,0.30)');
+    puff(n * 0.70, n * 0.62, n * 0.40, 'rgba(30,140,190,0.24)');
+    puff(n * 0.55, n * 0.20, n * 0.28, 'rgba(200,60,150,0.16)');
+  });
+}
+
+// ===============================================================
+// STUDIO SPLASH — Fateful Games
+// Matches the established mark: segmented wheel with a gap, a settling
+// die, deep purple ground. Drawn in code like everything else.
+// ===============================================================
+const FG = {
+  ground: 0x20143e,
+  gold:   0xf0c000,
+  hivis:  0xf2620f,
+  ink:    0xe8eaed,
+  ivory:  0xf4efe4,
+  pip:    0x1a1526
+};
+
+function splashCreate() {
+  const cx = CFG.width / 2, cy = CFG.height * 0.44;
+
+  this.cameras.main.setBackgroundColor('#20143e');
+  this.cameras.main.fadeIn(280, 32, 20, 62);
+
+  // Arcs rippling outward, sharing the wheel's gap orientation
+  const arcs = [];
+  [96, 128, 162, 200].forEach((r, i) => {
+    const a = this.add.image(cx, cy, 'fg_arc')
+      .setScale(r / 100).setAlpha(0).setAngle(-140);
+    arcs.push(a);
+    this.tweens.add({ targets: a, alpha: 0.13 - i * 0.026, angle: 0,
+      duration: 1500 + i * 260, delay: 220 + i * 90, ease: 'Cubic.easeOut' });
+  });
+
+  const wheel = this.add.image(cx, cy, 'fg_wheel').setAngle(-140).setAlpha(0);
+  this.tweens.add({ targets: wheel, angle: 0, alpha: 1,
+    duration: 1150, ease: 'Cubic.easeOut' });
+
+  const die = this.add.image(cx, cy, 'fg_die').setScale(0.2).setAlpha(0).setAngle(38);
+  this.tweens.add({ targets: die, scale: 1, alpha: 1, angle: 0,
+    duration: 620, delay: 380, ease: 'Back.easeOut' });
+
+  const word = this.add.text(cx, cy + 132, 'FATEFUL', {
+    fontFamily: FONT.display, fontSize: '40px',
+    fill: '#e8eaed', fontStyle: 'bold' }).setOrigin(0.5).setAlpha(0);
+  const sub = this.add.text(cx, cy + 168, 'G A M E S', {
+    fontFamily: FONT.display, fontSize: '15px',
+    fill: '#f0c000', fontStyle: 'bold' }).setOrigin(0.5).setAlpha(0);
+
+  this.tweens.add({ targets: [word, sub], alpha: 1, y: '-=10',
+    duration: 620, delay: 900, ease: 'Cubic.easeOut' });
+
+  const tag = this.add.text(cx, CFG.height - 58, 'A FATEFUL GAMES PRODUCTION', {
+    fontFamily: FONT.display, fontSize: '10px', fill: '#7a6a9c' })
+    .setOrigin(0.5).setAlpha(0);
+  this.tweens.add({ targets: tag, alpha: 1, duration: 700, delay: 1300 });
+
+  let left = false;
+  const leave = () => {
+    if (left) return;
+    left = true;
+    this.cameras.main.fadeOut(320, 32, 20, 62);
+    this.cameras.main.once('camerafadeoutcomplete', () => this.scene.start('Title'));
+  };
+
+  // Nobody should have to sit through a studio card twice
+  this.input.once('pointerdown', leave);
+  this.time.delayedCall(2600, leave);
+}
+
+// ===============================================================
+// TITLE SCENE
+// ===============================================================
+let titleStars = [], titleGfx, titleOrbiters = [];
+
+function fmtTime(s) {
+  const m = Math.floor(s / 60);
+  return m > 0 ? m + 'm ' + (s % 60) + 's' : s + 's';
+}
+
+function titleCreate() {
+  best = loadBest();
+  meta = loadMeta();
+  this.cameras.main.fadeIn(240, 10, 14, 20);
+
+  let starting = false;
+  const beginGame = () => {
+    if (starting) return;
+    starting = true;
+    // Audio must never block the start — creating an AudioContext can
+    // throw in an Android WebView.
+    try { SFX.init(); SFX.resume(); SFX.select(); } catch (e) { /* silent */ }
+    this.scene.start('Game');
+  };
+
+  titleGfx = this.add.graphics().setDepth(-10);
+  titleStars = makeStarfield(1.15);
+  addBackground(this);
+
+  this.add.text(CFG.width / 2, 96, 'ULTIMATE', {
+    fontFamily: FONT.display, fontSize:'40px', fill:'#e8edf2', fontStyle:'bold' }).setOrigin(0.5);
+  this.add.text(CFG.width / 2, 140, 'SURVIVOR', {
+    fontFamily: FONT.display, fontSize:'40px', fill:'#4fd6e8', fontStyle:'bold' }).setOrigin(0.5);
+  this.add.text(CFG.width / 2, 176, 'S U R V I V E   T H E   S W A R M', {
+    fontFamily: FONT.display, fontSize:'10px', fill:'#5a6b7b' }).setOrigin(0.5);
+
+  const cx = CFG.width / 2, cy = 262;
+  const hero = this.add.image(cx, cy, 'player').setScale(2.1);
+  this.tweens.add({ targets: hero, angle: 6, duration: 2200,
+                    yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+
+  titleOrbiters = [];
+  ['e_drone', 'e_runner', 'e_swarm', 'e_drone'].forEach((tex, i) => {
+    const o = this.add.image(cx, cy, tex).setScale(1.4);
+    titleOrbiters.push({ obj: o, cx: cx, cy: cy,
+      a: (i / 4) * Math.PI * 2, r: 70 + (i % 2) * 22, spd: 0.5 + i * 0.1 });
+  });
+
+  if (best.time > 0) {
+    this.add.text(CFG.width / 2, 352, 'BEST RUN', {
+      fontFamily: FONT.display, fontSize:'10px', fill:'#5a6b7b', fontStyle:'bold' }).setOrigin(0.5);
+    this.add.text(CFG.width / 2, 376, fmtTime(best.time), {
+      fontFamily: FONT.display, fontSize:'24px', fill:'#f1c40f', fontStyle:'bold' }).setOrigin(0.5);
+    this.add.text(CFG.width / 2, 400,
+      'Level ' + best.level + '  \u2022  ' + best.bosses + ' bosses  \u2022  ' +
+      best.runs + ' run' + (best.runs === 1 ? '' : 's'), {
+      fontFamily: FONT.display, fontSize:'11px', fill:'#7f8c9a' }).setOrigin(0.5);
+  } else {
+    this.add.text(CFG.width / 2, 376, 'NO RUNS YET', {
+      fontFamily: FONT.display, fontSize:'13px', fill:'#5a6b7b', fontStyle:'bold' }).setOrigin(0.5);
+  }
+
+  this.add.text(CFG.width / 2, 430, '\u2726  ' + meta.salvage + '  SALVAGE', {
+    fontFamily: FONT.display, fontSize:'14px', fill:'#f1c40f', fontStyle:'bold' }).setOrigin(0.5);
+
+  if (!storageOK) {
+    this.add.text(CFG.width / 2, 452, 'progress won\u2019t save here \u2014 storage blocked', {
+      fontFamily: FONT.display, fontSize:'10px', fill:'#8e5a3a' }).setOrigin(0.5);
+  }
+
+  // Explicit buttons now that there's more than one destination —
+  // tap-anywhere can't coexist with a second option.
+  const play = panelButton(this, null, 512, 'PLAY', 0x2ecc71, beginGame);
+  this.tweens.add({ targets: play.label, alpha: 0.45, duration: 900,
+                    yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+
+  panelButton(this, null, 578, 'UPGRADE BAY', 0x4fd6e8, () => {
+    try { SFX.init(); SFX.resume(); SFX.select(); } catch (e) {}
+    this.scene.start('Shop');
+  });
+
+  if (this.input.keyboard) this.input.keyboard.on('keydown', beginGame);
+
+  this.add.text(CFG.width / 2, 640,
+    (prefs.controls === 'stick' ? 'touch anywhere to steer' : 'drag to move') +
+    '  \u2022  fires on its own', {
+    fontFamily: FONT.display, fontSize:'10px', fill:'#4a5b6b' }).setOrigin(0.5);
+  this.add.text(CFG.width - 10, 12, CFG.version, {
+    fontFamily: FONT.display, fontSize:'10px', fill:'#3d4a56' }).setOrigin(1, 0);
+}
+
+function titleUpdate(time, delta) {
+  drawStars(titleGfx, titleStars, delta, time);
+  titleOrbiters.forEach(o => {
+    o.a += o.spd * (delta / 1000);
+    o.obj.x = o.cx + Math.cos(o.a) * o.r;
+    o.obj.y = o.cy + Math.sin(o.a) * o.r * 0.55;
+    o.obj.rotation = Math.sin(time * 0.006 + o.a) * 0.2;
+  });
+}
+
+// ===============================================================
+// UPGRADE BAY
+// ===============================================================
+function shopCreate() {
+  meta = loadMeta();
+  this.cameras.main.fadeIn(240, 10, 14, 20);
+
+  titleGfx = this.add.graphics().setDepth(-10);
+  titleStars = makeStarfield(0.8);
+  addBackground(this);
+
+  this.input.once('pointerdown', () => {
+    try { SFX.init(); SFX.resume(); } catch (e) {}
+  });
+
+  this.add.text(CFG.width / 2, 38, 'UPGRADE BAY', {
+    fontFamily: FONT.display, fontSize:'24px', fill:'#4fd6e8', fontStyle:'bold' }).setOrigin(0.5);
+
+  const balance = this.add.text(CFG.width / 2, 72, '', {
+    fontFamily: FONT.display, fontSize:'15px', fill:'#f1c40f', fontStyle:'bold' }).setOrigin(0.5);
+  const paintBalance = () => balance.setText('\u2726  ' + meta.salvage + '  SALVAGE');
+  paintBalance();
+
+  const repaint = [];
+
+  META_UPGRADES.forEach((u, i) => {
+    const y = 132 + i * 76;
+
+    const box = this.add.rectangle(CFG.width / 2, y, 344, 66, COL.card)
+      .setStrokeStyle(2, 0x2b3a47, 1)
+      .setInteractive({ useHandCursor: true });
+
+    this.add.text(36, y - 17, u.name, {
+      fontFamily: FONT.display, fontSize:'13px', fill:'#e8edf2', fontStyle:'bold' }).setOrigin(0, 0.5);
+    this.add.text(36, y + 2, u.desc, {
+      fontFamily: FONT.display, fontSize:'10px', fill:'#7f8c9a' }).setOrigin(0, 0.5);
+    const pips = this.add.text(36, y + 20, '', {
+      fontFamily: FONT.display, fontSize:'10px', fill:'#4a5b6b' }).setOrigin(0, 0.5);
+    const cost = this.add.text(CFG.width - 36, y, '', {
+      fontFamily: FONT.display, fontSize:'15px', fontStyle:'bold' }).setOrigin(1, 0.5);
+
+    const paint = () => {
+      const lv = metaLevel(u.id);
+      const max = u.costs.length;
+      pips.setText('\u25CF'.repeat(lv) + '\u25CB'.repeat(max - lv));
+
+      if (lv >= max) {
+        cost.setText('MAX').setColor('#4a5b6b');
+        box.setStrokeStyle(2, 0x2b3a47, 1);
+        return;
+      }
+      const price = u.costs[lv];
+      const afford = meta.salvage >= price;
+      cost.setText(String(price)).setColor(afford ? '#f1c40f' : '#6b5a2a');
+      box.setStrokeStyle(2, afford ? 0x4fd6e8 : 0x2b3a47, afford ? 0.75 : 1);
+    };
+
+    paint();
+    repaint.push(paint);
+
+    box.on('pointerdown', () => {
+      const lv = metaLevel(u.id);
+      if (lv >= u.costs.length) return;
+      const price = u.costs[lv];
+      if (meta.salvage < price) { SFX.hit(); return; }
+
+      meta.salvage -= price;
+      meta.owned[u.id] = lv + 1;
+      saveMeta();
+      SFX.levelUp();
+
+      paintBalance();
+      // One purchase changes what's affordable everywhere, so repaint all
+      repaint.forEach(fn => fn());
+    });
+  });
+
+  panelButton(this, null, 648, 'BACK', 0x7f8c9a, () => {
+    try { SFX.select(); } catch (e) {}
+    this.scene.start('Title');
+  });
+}
+
+function shopUpdate(time, delta) {
+  drawStars(titleGfx, titleStars, delta, time);
+}
+
+// ===============================================================
+function create() {
+  resetRun();
+  uiCapture = false;
+  this.cameras.main.fadeIn(240, 10, 14, 20);
+
+  // Drifting starfield, behind everything
+  starGfx = this.add.graphics().setDepth(-10);
+  stars = makeStarfield(1);
+  addBackground(this);
+
+  makeBursts(this);
+  stickGfx = this.add.graphics().setDepth(700);
+  resetStick();
+
+  // A second pointer so you can hit pause without dropping the stick
+  this.input.addPointer(1);
+
+  this.input.on('pointerdown', (p) => {
+    if (isPaused || isGameOver || prefs.controls !== 'stick') return;
+    if (p.y < CFG.hudSafeY) return;   // HUD strip belongs to the buttons
+    if (stick.active) return;         // already steering with another finger
+    stick.active = true;
+    stick.id = p.id;
+    stick.ox = stick.nx = p.worldX;
+    stick.oy = stick.ny = p.worldY;
+    stick.dx = stick.dy = stick.mag = 0;
+  });
+
+  this.input.on('pointermove', (p) => {
+    if (!stick.active || p.id !== stick.id) return;
+    const dx = p.worldX - stick.ox, dy = p.worldY - stick.oy;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (d < 0.001) { stick.mag = 0; return; }
+    stick.dx = dx / d;
+    stick.dy = dy / d;
+    stick.mag = Math.min(d, CFG.stickRadius);
+    stick.nx = stick.ox + stick.dx * stick.mag;
+    stick.ny = stick.oy + stick.dy * stick.mag;
+  });
+
+  const endStick = (p) => {
+    if (!stick.active) return;
+    if (p && p.id !== stick.id) return;
+    resetStick();
+  };
+  this.input.on('pointerup', endStick);
+  this.input.on('pointerupoutside', endStick);
+
+  // Web Audio starts suspended until the user touches the screen —
+  // browser autoplay policy, not a bug. First tap wakes it up.
+  const wake = () => { SFX.init(); SFX.resume(); };
+  Ads.init();
+  this.input.on('pointerdown', wake);
+  this.input.keyboard.on('keydown', wake);
+  this.input.on('pointerup', () => { uiCapture = false; });
+
+  player = this.physics.add.sprite(CFG.width / 2, CFG.height / 2, 'player');
+  player.setCollideWorldBounds(true);
+  player.setCircle(16);
+
+  enemies   = this.physics.add.group();
+  bullets   = this.physics.add.group();
+  gems      = this.physics.add.group();
+  bossShots = this.physics.add.group();
+
+  hpGfx      = this.add.graphics().setDepth(50);
+  rangeGfx   = this.add.graphics().setDepth(-5);
+  bossBarGfx = this.add.graphics().setDepth(800);
+
+  cursors = this.input.keyboard.createCursorKeys();
+  wasd = this.input.keyboard.addKeys({
+    up: Phaser.Input.Keyboard.KeyCodes.W,
+    down: Phaser.Input.Keyboard.KeyCodes.S,
+    left: Phaser.Input.Keyboard.KeyCodes.A,
+    right: Phaser.Input.Keyboard.KeyCodes.D
+  });
+
+  hudGfx   = this.add.graphics().setDepth(60);
+  hudText  = this.add.text(14, 30, '', {
+    fontFamily: FONT.mono, fontSize:'22px', fill:'#ffffff', fontStyle:'bold' });
+  hullText = this.add.text(14, 60, '', {
+    fontFamily: FONT.display, fontSize:'11px', fill:'#7f8c9a', fontStyle:'bold' });
+
+  bossNameText = this.add.text(CFG.width / 2, 96, '', {
+    fontFamily: FONT.display, fontSize:'12px', fill:'#ff4757', fontStyle:'bold' }).setOrigin(0.5).setDepth(801);
+
+  // Tapping anywhere normally drags the player, so this button sets a
+  // capture flag that suppresses movement until the finger lifts.
+  const muteBtn = this.add.text(CFG.width - 12, 46, '', {
+    fontFamily: FONT.display, fontSize:'11px', fontStyle:'bold' })
+    .setOrigin(1, 0).setDepth(1100)
+    .setInteractive({ useHandCursor: true });
+
+  // Three states: everything / everything but the gun / silent.
+  // Plain text rather than an emoji — emoji rendering in canvas varies
+  // wildly between Android devices and fonts.
+  const paintMute = () => muteBtn.setText(SFX.label()).setColor(SFX.colour());
+  paintMute();
+
+  muteBtn.on('pointerdown', () => {
+    uiCapture = true;
+    SFX.init(); SFX.resume();
+    SFX.cycle();
+    paintMute();
+  });
+
+  const pauseBtn = this.add.text(CFG.width - 12, 60, 'PAUSE', {
+    fontFamily: FONT.display, fontSize:'11px', fill:'#7f8c9a', fontStyle:'bold' })
+    .setOrigin(1, 0).setDepth(1100)
+    .setInteractive({ useHandCursor: true });
+  pauseBtn.on('pointerdown', () => { uiCapture = true; showPause(this); });
+
+  requestWake();
+
+  // Backgrounding the app shouldn't cost you a run. Phaser halts its
+  // loop when the tab hides, but you'd come back mid-fight — this puts
+  // the pause screen up so you get a moment to re-orient.
+  // 'blur' and 'pagehide' are here because Android WebViews don't fire
+  // visibilitychange reliably on every kind of interruption.
+  const onHide = () => {
+    if (!isPaused && !isGameOver && this.scene.isActive()) showPause(this);
+    releaseWake();
+  };
+  const onVisible = () => {
+    if (document.hidden) onHide();
+    else if (!isGameOver && this.scene.isActive()) requestWake();
+  };
+
+  document.addEventListener('visibilitychange', onVisible);
+  window.addEventListener('blur', onHide);
+  window.addEventListener('pagehide', onHide);
+
+  this.events.once('shutdown', () => {
+    document.removeEventListener('visibilitychange', onVisible);
+    window.removeEventListener('blur', onHide);
+    window.removeEventListener('pagehide', onHide);
+    releaseWake();
+  });
+
+  updateHUD();
+
+  // Survival clock — also drives boss spawns
+  this.time.addEvent({ delay:1000, loop:true, callbackScope:this, callback: function () {
+    if (isGameOver) return;
+    score++;
+    updateHUD();
+    if (score % CFG.bossInterval === 0) spawnBoss(this);
+  }});
+
+  rebuildFireTimer(this);
+
+  this.physics.add.overlap(player, enemies, touchEnemy, null, this);
+  this.physics.add.overlap(player, bossShots, touchBossShot, null, this);
+  this.physics.add.overlap(bullets, enemies, hitEnemyWithBullet, null, this);
+  this.physics.add.overlap(player, gems, collectCore, null, this);
+}
+
+// ===============================================================
+function update(time, delta) {
+  if (isGameOver || isPaused) return;
+
+  // --- Starfield, parallaxed against the player's offset from centre
+  drawStars(starGfx, stars, delta, time,
+            player.x - CFG.width / 2, player.y - CFG.height / 2);
+
+  // --- Player movement
+  player.setVelocity(0);
+  const pointer = this.input.activePointer;
+  let steered = false;
+
+  if (prefs.controls === 'stick') {
+    if (stick.active && stick.mag > CFG.stickDeadzone) {
+      // Speed ramps with how far the nub is pushed, so small nudges
+      // give fine control instead of everything being full throttle.
+      const t = (stick.mag - CFG.stickDeadzone) / (CFG.stickRadius - CFG.stickDeadzone);
+      const spd = stats.moveSpeed * Math.min(1, t);
+      player.setVelocity(stick.dx * spd, stick.dy * spd);
+      steered = true;
+    }
+  } else if (pointer.isDown && !uiCapture) {
+    const dist = Phaser.Math.Distance.Between(player.x, player.y, pointer.worldX, pointer.worldY);
+    if (dist > CFG.moveDeadzone) {
+      this.physics.moveTo(player, pointer.worldX, pointer.worldY, stats.moveSpeed);
+    }
+    steered = true;
+  }
+
+  if (!steered) {
+    if (cursors.left.isDown || wasd.left.isDown) player.setVelocityX(-stats.moveSpeed);
+    else if (cursors.right.isDown || wasd.right.isDown) player.setVelocityX(stats.moveSpeed);
+    if (cursors.up.isDown || wasd.up.isDown) player.setVelocityY(-stats.moveSpeed);
+    else if (cursors.down.isDown || wasd.down.isDown) player.setVelocityY(stats.moveSpeed);
+  }
+
+  drawStick();
+  player.setAlpha(this.time.now < invulnUntil ? 0.45 : 1);
+
+  // Lean into the direction of travel, drift gently when stationary
+  const vx = player.body.velocity.x, vy = player.body.velocity.y;
+  const moving = Math.abs(vx) + Math.abs(vy) > 10;
+  const targetTilt = moving
+    ? Phaser.Math.Clamp(vx / 700, -0.30, 0.30)
+    : Math.sin(time * 0.0016) * 0.06;
+  player.rotation += (targetTilt - player.rotation) * 0.12;
+
+  // --- Spawning, ramping with survival time
+  spawnAccum += delta;
+  if (spawnAccum >= spawnDelay()) {
+    spawnAccum = 0;
+    spawnWave();
+  }
+
+  // Faint ring so it's obvious why the gun is or isn't firing
+  rangeGfx.clear();
+  rangeGfx.lineStyle(1, 0x4fd6e8, 0.14);
+  rangeGfx.strokeEllipse(player.x, player.y, stats.rangeX * 2, stats.rangeY * 2);
+
+  // --- Enemy movement and scuttle
+  // Rotation is safe to animate per frame: arcade circle bodies don't
+  // rotate with the sprite, so the hitbox never moves. Scale would
+  // resize the body, so that's reserved for one-shot tweens.
+  const sScale = speedScale();
+  const tSec = time * 0.001;
+  enemies.getChildren().forEach(e => {
+    if (!e.active) return;
+    if (e.getData('isBoss')) {
+      e.rotation = Math.sin(tSec * 1.1 + e.getData('phase')) * 0.07;   // slow menace
+      return;
+    }
+    e.rotation = Math.sin(tSec * e.getData('wob') + e.getData('phase')) * 0.18;
+    this.physics.moveToObject(e, player, effSpeed(this, e) * sScale);
+  });
+
+  // --- Boss behaviour
+  if (activeBoss && activeBoss.active) {
+    const def = BOSSES[activeBoss.getData('defIndex')];
+    def.move(this, activeBoss);
+    let cd = activeBoss.getData('cd') - delta;
+    if (cd <= 0) { def.ability(this, activeBoss); cd = def.cooldown; }
+    activeBoss.setData('cd', cd);
+  } else if (activeBoss && !activeBoss.active) {
+    activeBoss = null;
+    bossNameText.setText('');
+  }
+
+  // --- Core magnet
+  gems.getChildren().forEach(gem => {
+    if (!gem.active) return;
+    gem.rotation += delta * 0.0035;
+    if (!gem.getData('pulled') &&
+        Phaser.Math.Distance.Between(player.x, player.y, gem.x, gem.y) < stats.magnetRadius) {
+      gem.setData('pulled', true);
+    }
+    if (gem.getData('pulled')) this.physics.moveToObject(gem, player, CFG.magnetSpeed);
+  });
+
+  // --- Cull off-screen projectiles
+  const cull = (obj) => (obj.x < -30 || obj.x > CFG.width + 30 ||
+                         obj.y < -30 || obj.y > CFG.height + 30);
+  bullets.getChildren().slice().forEach(b => { if (cull(b)) b.destroy(); });
+  bossShots.getChildren().slice().forEach(s => { if (cull(s)) s.destroy(); });
+
+  drawHealthBars();
+}
+
+// ===============================================================
+// SPAWNING
+// ===============================================================
+function edgePoint() {
+  if (Math.random() < 0.5) {
+    return { x: Math.random() < 0.5 ? -25 : CFG.width + 25, y: Math.random() * CFG.height };
+  }
+  return { x: Math.random() * CFG.width, y: Math.random() < 0.5 ? -25 : CFG.height + 25 };
+}
+
+function pickType() {
+  const unlocked = ENEMY_TYPES.filter(t => score >= t.unlockAt);
+  const total = unlocked.reduce((sum, t) => sum + t.weight, 0);
+  let roll = Math.random() * total;
+  for (const t of unlocked) {
+    roll -= t.weight;
+    if (roll <= 0) return t;
+  }
+  return unlocked[0];
+}
+
+function spawnWave() {
+  if (isGameOver || isPaused) return;
+  const type = pickType();
+  const at = edgePoint();
+  for (let i = 0; i < type.cluster; i++) {
+    spawnEnemyOfType(type,
+      at.x + (Math.random() - 0.5) * 50,
+      at.y + (Math.random() - 0.5) * 50);
+  }
+}
+
+function spawnEnemyOfType(type, x, y) {
+  const e = enemies.create(x, y, type.texture);
+  e.setCircle(type.radius);
+  const hp = Math.ceil(type.hp * hpScale());
+  e.setData({ hp: hp, maxHp: hp, speed: type.speed, cores: type.cores,
+              burst: type.burst || 'red', isBoss: false,
+              phase: Math.random() * Math.PI * 2,
+              wob: 7 + Math.random() * 5 });
+  return e;
+}
+
+function spawnBoss(scene) {
+  if (isGameOver || activeBoss) return;      // one boss at a time
+
+  const idx = bossCount % BOSSES.length;
+  const def = BOSSES[idx];
+  bossCount++;
+
+  const at = edgePoint();
+  const boss = enemies.create(at.x, at.y, def.texture);
+  boss.setCircle(def.radius);
+
+  // Each boss is tougher than the last. Deliberately NOT multiplied by
+  // hpScale() as well — stacking both ramps is what made boss 1 a 37s slog.
+  const tier = 1 + (bossCount - 1) * CFG.bossHpGrowth;
+  const hp = Math.ceil(def.hp * tier);
+
+  boss.setData({ hp: hp, maxHp: hp, speed: def.speed, cores: def.cores,
+                 burst: def.burst || 'boss', isBoss: true, defIndex: idx,
+                 cd: def.cooldown, charging: false,
+                 phase: Math.random() * Math.PI * 2 });
+  activeBoss = boss;
+
+  SFX.bossIn();
+  bossNameText.setText(def.name);
+
+  // The background picks up the boss's colour while it's alive
+  if (bossAura) bossAura.destroy();
+  bossAura = scene.add.rectangle(CFG.width / 2, CFG.height / 2,
+    CFG.width, CFG.height, BURST_COLOURS[def.burst || 'boss'], 0.04)
+    .setDepth(-12).setBlendMode('ADD');
+  scene.tweens.add({ targets: bossAura, alpha: 0.12, duration: 1500,
+                     yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+
+  const warn = scene.add.text(CFG.width / 2, CFG.height / 2 - 40,
+    '⚠  ' + def.name + '  ⚠', {
+      fontFamily: FONT.display, fontSize:'22px', fill:'#ff4757', fontStyle:'bold' }).setOrigin(0.5).setDepth(900);
+  scene.tweens.add({ targets: warn, alpha: 0, duration: 1800, onComplete: () => warn.destroy() });
+  scene.cameras.main.shake(400, 0.006);
+}
+
+// ===============================================================
+// COMBAT
+// ===============================================================
+function rebuildFireTimer(scene) {
+  if (fireTimer) fireTimer.remove();
+  fireTimer = scene.time.addEvent({
+    delay: stats.fireDelay, callback: autoFire, callbackScope: scene, loop: true });
+}
+
+function autoFire() {
+  if (isGameOver || isPaused) return;
+
+  // Only aliens inside the engagement ellipse are valid targets.
+  // (dx/rx)^2 + (dy/ry)^2 <= 1 is the standard point-in-ellipse test,
+  // and like the circle version it needs no square root.
+  const rx = stats.rangeX, ry = stats.rangeY;
+  const alive = enemies.getChildren().filter(e => {
+    if (!e.active) return false;
+    const nx = (e.x - player.x) / rx;
+    const ny = (e.y - player.y) / ry;
+    return nx * nx + ny * ny <= 1;
+  });
+  if (alive.length === 0) return;   // holds fire, and stays silent
+
+  alive.sort((a, b) =>
+    Phaser.Math.Distance.Between(player.x, player.y, a.x, a.y) -
+    Phaser.Math.Distance.Between(player.x, player.y, b.x, b.y));
+
+  SFX.shoot(stats.fireDelay);   // once per volley, not per projectile
+
+  for (let i = 0; i < stats.projectiles; i++) {
+    const target = alive[i % alive.length];
+    const bullet = bullets.create(player.x, player.y, 'bullet');
+    bullet.setCircle(7);
+
+    // Only the first projectile hits for full damage. Without this,
+    // damage x fire rate x projectiles all multiply and the build runs away.
+    const dmg = (i === 0)
+      ? stats.damage
+      : Math.max(1, Math.round(stats.damage * CFG.extraShotDamage));
+    bullet.setData({ pierce: stats.pierce, damage: dmg });
+    if (i > 0) bullet.setScale(0.8);
+
+    let angle = Phaser.Math.Angle.Between(player.x, player.y, target.x, target.y);
+    if (i >= alive.length) {
+      const step = Math.floor((i - alive.length) / 2) + 1;
+      angle += Phaser.Math.DegToRad(step * 9 * ((i % 2) ? 1 : -1));
+    }
+    this.physics.velocityFromRotation(angle, stats.bulletSpeed, bullet.body.velocity);
+  }
+}
+
+function hitEnemyWithBullet(bullet, enemy) {
+  if (!bullet.active || !enemy.active) return;
+
+  const hp = enemy.getData('hp') - bullet.getData('damage');
+
+  if (stats.slow > 0) enemy.setData('slowUntil', this.time.now + CFG.slowMs);
+
+  const pierce = bullet.getData('pierce') || 0;
+  if (pierce > 0) bullet.setData('pierce', pierce - 1);
+  else bullet.destroy();
+
+  if (hp > 0) {
+    enemy.setData('hp', hp);
+    enemy.setTintFill(0xffffff);
+    // Scale punch. Briefly widens the hitbox by a few pixels, which
+    // reads as generous rather than unfair.
+    this.tweens.killTweensOf(enemy);
+    enemy.setScale(1.22);
+    this.tweens.add({ targets: enemy, scale: 1, duration: 130, ease: 'Quad.easeOut' });
+    burst(enemy.getData('burst'), enemy.x, enemy.y, 2);
+    SFX.hit();
+    this.time.delayedCall(55, () => { if (enemy.active) enemy.clearTint(); });
+    return;
+  }
+
+  killEnemy(this, enemy);
+}
+
+function killEnemy(scene, enemy) {
+  const x = enemy.x, y = enemy.y;
+  const cores = enemy.getData('cores');
+  const wasBoss = enemy.getData('isBoss');
+  const burstKey = enemy.getData('burst') || 'red';
+  const tex = enemy.texture.key;
+
+  enemy.destroy();
+  deathPop(scene, tex, x, y, wasBoss ? 2.4 : 1.8, wasBoss ? 420 : 210);
+
+  if (wasBoss) {
+    activeBoss = null;
+    bossNameText.setText('');
+    if (bossAura) { bossAura.destroy(); bossAura = null; }
+    burst(burstKey, x, y, 60);
+    SFX.bossDie();
+    scene.cameras.main.shake(360, 0.012);
+    scene.cameras.main.flash(220, 255, 180, 90);
+
+    // Hit-stop: freeze the field for a beat so the kill lands. Only
+    // physics is paused, so the clock still runs and can resume us.
+    scene.physics.pause();
+    scene.time.delayedCall(190, () => {
+      if (!isPaused && !isGameOver) scene.physics.resume();
+    });
+  } else {
+    burst(burstKey, x, y, 9);
+    SFX.kill();
+  }
+
+  for (let i = 0; i < cores; i++) {
+    const spread = wasBoss ? 55 : 14;
+    const gem = gems.create(
+      x + (Math.random() - 0.5) * spread,
+      y + (Math.random() - 0.5) * spread, 'gem');
+    gem.setCircle(7);
+    gem.setData('pulled', false);
+    gem.setScale(0.3);
+    scene.tweens.add({ targets: gem, scale: 1, duration: 170, ease: 'Back.easeOut' });
+  }
+}
+
+function damagePlayer(scene) {
+  if (isGameOver || scene.time.now < invulnUntil) return;
+
+  stats.hp -= 1;
+  invulnUntil = scene.time.now + CFG.invulnMs;
+  burst('hurt', player.x, player.y, 14);
+  SFX.hurt();
+  scene.cameras.main.shake(180, 0.012);
+  scene.cameras.main.flash(140, 255, 60, 60);
+  updateHUD();
+
+  if (stats.hp <= 0) {
+    // Emergency Beacon. Clearing nearby aliens matters — reviving into
+    // the same swarm that just killed you isn't a second chance.
+    if (stats.revives > 0) {
+      stats.revives -= 1;
+      revivePlayer(scene);
+      return;
+    }
+    gameOver(scene);
+  }
+}
+
+function touchEnemy(playerObj, enemy) {
+  if (!enemy.active) return;
+  damagePlayer(this);
+}
+
+function touchBossShot(playerObj, shot) {
+  if (!shot.active) return;
+  shot.destroy();
+  damagePlayer(this);
+}
+
+// ===============================================================
+// XP / LEVELLING
+// ===============================================================
+function collectCore(playerObj, gem) {
+  if (!gem.active) return;
+  const gx = gem.x, gy = gem.y;
+  gem.destroy();
+  runCores += 1;
+  burst('core', gx, gy, 3);
+  SFX.pickup();
+  xp += stats.xpGain;
+  updateHUD();
+  if (xp >= xpToNextLevel) advanceLevel(this);
+}
+
+function advanceLevel(scene) {
+  xp -= xpToNextLevel;
+  playerLevel++;
+  xpToNextLevel = Math.floor(xpToNextLevel * CFG.xpCurve) + CFG.xpFlat;
+  SFX.levelUp();
+  scene.cameras.main.flash(180, 46, 204, 113);
+  updateHUD();
+  showUpgradeChoice(scene);
+}
+
+function weightedPick(pool) {
+  const total = pool.reduce((sum, u) => sum + (u.weight || 1), 0);
+  let roll = Math.random() * total;
+  for (const u of pool) {
+    roll -= (u.weight || 1);
+    if (roll <= 0) return u;
+  }
+  return pool[pool.length - 1];
+}
+
+function rollUpgrades(count) {
+  let pool = UPGRADES.filter(u => (taken[u.id] || 0) < u.max);
+  // Don't offer a heal at full hull — it's a dead card
+  if (stats.hp >= stats.maxHp) pool = pool.filter(u => u.id !== 'repair');
+
+  const picks = [];
+
+  // Guarantee one real weapon upgrade on every level-up
+  const offensive = pool.filter(u => u.offensive);
+  if (offensive.length) {
+    const first = weightedPick(offensive);
+    picks.push(first);
+    pool = pool.filter(u => u.id !== first.id);
+  }
+
+  while (picks.length < count && pool.length > 0) {
+    const u = weightedPick(pool);
+    picks.push(u);
+    pool = pool.filter(p => p.id !== u.id);
+  }
+  while (picks.length < count) picks.push(FALLBACK);
+
+  // Shuffle so the guaranteed weapon isn't always the top card
+  Phaser.Utils.Array.Shuffle(picks);
+  return picks;
+}
+
+function showUpgradeChoice(scene) {
+  isPaused = true;
+  scene.physics.pause();
+  scene.time.paused = true;
+
+  const picks = rollUpgrades(CFG.cardCount);
+  const layer = scene.add.container(0, 0).setDepth(1000);
+
+  layer.add(scene.add.rectangle(CFG.width / 2, CFG.height / 2, CFG.width, CFG.height, 0x000000, 0.8));
+  layer.add(scene.add.text(CFG.width / 2, 158, 'LEVEL ' + playerLevel, {
+    fontFamily: FONT.display, fontSize:'32px', fill:'#2ecc71', fontStyle:'bold' }).setOrigin(0.5));
+  layer.add(scene.add.text(CFG.width / 2, 190, 'SELECT ONE SYSTEM', {
+    fontFamily: FONT.display, fontSize:'12px', fill:'#7f8c9a', fontStyle:'bold' }).setOrigin(0.5));
+
+  // Current loadout, so you can see what a card is actually worth
+  layer.add(scene.add.text(CFG.width / 2, 216,
+    'DMG ' + stats.damage + '   RATE ' + stats.fireDelay + 'ms   SHOTS ' + stats.projectiles +
+    '   RANGE ' + stats.rangeX + 'x' + stats.rangeY + '   PIERCE ' + stats.pierce +
+    '   SLOW ' + Math.round(stats.slow * 100) + '%', {
+    fontFamily: FONT.display, fontSize:'10px', fill:'#4a5b6b' }).setOrigin(0.5));
+
+  picks.forEach((upg, i) => {
+    const y = 280 + i * 112;
+    const stacks = taken[upg.id] || 0;
+
+    const card = scene.add.rectangle(CFG.width / 2, y, 324, 96, COL.card)
+      .setStrokeStyle(2, COL.accent, 0.55)
+      .setInteractive({ useHandCursor: true });
+
+    const name = scene.add.text(CFG.width / 2, y - 22, upg.name, {
+      fontFamily: FONT.display, fontSize:'17px', fill:'#00d2d3', fontStyle:'bold' }).setOrigin(0.5);
+    const desc = scene.add.text(CFG.width / 2, y + 4, upg.desc, {
+      fontFamily: FONT.display, fontSize:'13px', fill:'#c8d2dc' }).setOrigin(0.5);
+
+    const pips = upg.max <= 8
+      ? '●'.repeat(stacks) + '○'.repeat(Math.max(0, upg.max - stacks))
+      : 'REPEATABLE';
+    const pipText = scene.add.text(CFG.width / 2, y + 28, pips, {
+      fontFamily: FONT.display, fontSize:'11px', fill:'#4a5b6b' }).setOrigin(0.5);
+
+    card.on('pointerover', () => card.setStrokeStyle(2, COL.accent, 1));
+    card.on('pointerout',  () => card.setStrokeStyle(2, COL.accent, 0.55));
+    card.on('pointerdown', () => {
+      SFX.select();
+      taken[upg.id] = (taken[upg.id] || 0) + 1;
+      upg.apply(scene);
+      updateHUD();
+      layer.destroy();
+      if (xp >= xpToNextLevel) advanceLevel(scene);
+      else resumeRun(scene);
+    });
+
+    layer.add([card, name, desc, pipText]);
+    [card, name, desc, pipText].forEach(obj => {
+      obj.setAlpha(0);
+      scene.tweens.add({ targets: obj, alpha: 1, duration: 140, delay: i * 70 });
+    });
+  });
+}
+
+// Only drawn while a finger is down, so it never occupies screen space
+// when you aren't steering.
+function drawStick() {
+  stickGfx.clear();
+  if (!stick.active || prefs.controls !== 'stick') return;
+
+  stickGfx.fillStyle(0xffffff, 0.05);
+  stickGfx.fillCircle(stick.ox, stick.oy, CFG.stickRadius);
+  stickGfx.lineStyle(2, 0x4fd6e8, 0.30);
+  stickGfx.strokeCircle(stick.ox, stick.oy, CFG.stickRadius);
+
+  stickGfx.fillStyle(0x4fd6e8, 0.30);
+  stickGfx.fillCircle(stick.nx, stick.ny, CFG.stickNub);
+  stickGfx.lineStyle(2, 0x9be9f5, 0.65);
+  stickGfx.strokeCircle(stick.nx, stick.ny, CFG.stickNub);
+}
+
+function resumeRun(scene) {
+  isPaused = false;
+  scene.physics.resume();
+  scene.time.paused = false;
+}
+
+// Reusable panel button. Interactive rects avoid the "tap anywhere"
+// race where two handlers both fire on a single press.
+function panelButton(scene, layer, y, label, colour, onTap) {
+  const box = scene.add.rectangle(CFG.width / 2, y, 250, 52, COL.card)
+    .setStrokeStyle(2, colour, 0.6)
+    .setInteractive({ useHandCursor: true });
+  const txt = scene.add.text(CFG.width / 2, y, label, {
+    fontFamily: FONT.display, fontSize:'16px', fontStyle:'bold' })
+    .setColor('#' + colour.toString(16).padStart(6, '0')).setOrigin(0.5);
+
+  box.on('pointerover', () => box.setStrokeStyle(2, colour, 1));
+  box.on('pointerout',  () => box.setStrokeStyle(2, colour, 0.6));
+  box.on('pointerdown', () => { SFX.select(); onTap(); });
+
+  if (layer) layer.add([box, txt]);
+  return { box: box, label: txt };
+}
+
+function controlsLabel() {
+  return 'CONTROLS: ' + (prefs.controls === 'stick' ? 'JOYSTICK' : 'DRAG');
+}
+
+function showPause(scene) {
+  if (isPaused || isGameOver) return;
+  isPaused = true;
+  resetStick();          // don't resume mid-shove when you unpause
+  scene.physics.pause();
+  scene.time.paused = true;
+
+  const layer = scene.add.container(0, 0).setDepth(1200);
+  layer.add(scene.add.rectangle(CFG.width / 2, CFG.height / 2,
+    CFG.width, CFG.height, 0x000000, 0.82));
+
+  layer.add(scene.add.text(CFG.width / 2, 230, 'PAUSED', {
+    fontFamily: FONT.display, fontSize:'34px', fill:'#4fd6e8', fontStyle:'bold' }).setOrigin(0.5));
+  layer.add(scene.add.text(CFG.width / 2, 278,
+    fmtTime(score) + '   \u2022   Level ' + playerLevel + '   \u2022   ' +
+    bossCount + ' boss' + (bossCount === 1 ? '' : 'es'), {
+    fontFamily: FONT.display, fontSize:'13px', fill:'#7f8c9a' }).setOrigin(0.5));
+
+  const ctrl = panelButton(scene, layer, 348, controlsLabel(), 0x4fd6e8, () => {
+    prefs.controls = (prefs.controls === 'stick') ? 'drag' : 'stick';
+    savePrefs();
+    resetStick();
+    ctrl.label.setText(controlsLabel());
+  });
+
+  panelButton(scene, layer, 416, 'RESUME', 0x2ecc71, () => {
+    layer.destroy();
+    resumeRun(scene);
+  });
+  panelButton(scene, layer, 484, 'QUIT TO MENU', 0x7f8c9a, () => {
+    layer.destroy();
+    resumeRun(scene);              // unfreeze before leaving the scene
+    scene.scene.start('Title');
+  });
+}
+
+// ===============================================================
+// UI
+// ===============================================================
+function drawHealthBars() {
+  hpGfx.clear();
+  enemies.getChildren().forEach(e => {
+    if (!e.active || e.getData('isBoss')) return;
+    const maxHp = e.getData('maxHp');
+    if (maxHp <= 1) return;
+    const frac = Phaser.Math.Clamp(e.getData('hp') / maxHp, 0, 1);
+    const w = e.displayWidth;
+    const top = e.y - e.displayHeight / 2 - 7;
+    hpGfx.fillStyle(0x000000, 0.6); hpGfx.fillRect(e.x - w / 2, top, w, 3);
+    hpGfx.fillStyle(0xe74c3c, 1);   hpGfx.fillRect(e.x - w / 2, top, w * frac, 3);
+  });
+
+  bossBarGfx.clear();
+  if (activeBoss && activeBoss.active) {
+    const frac = Phaser.Math.Clamp(activeBoss.getData('hp') / activeBoss.getData('maxHp'), 0, 1);
+    bossBarGfx.fillStyle(0x000000, 0.7); bossBarGfx.fillRect(40, 112, CFG.width - 80, 8);
+    bossBarGfx.fillStyle(0xff4757, 1);   bossBarGfx.fillRect(40, 112, (CFG.width - 80) * frac, 8);
+  }
+}
+
+function fmtClock(sec) {
+  const m = Math.floor(sec / 60), r = sec % 60;
+  return m + ':' + (r < 10 ? '0' : '') + r;
+}
+
+function updateHUD() {
+  hudText.setText(fmtClock(score));
+  hullText.setText('LV ' + playerLevel +
+                   (stats.revives > 0 ? '     \u27F2 ' + stats.revives : ''));
+  drawHUD();
+}
+
+// Hull as pips and XP as a bar. A glanceable shape beats a number you
+// have to read while something is chasing you.
+function drawHUD() {
+  if (!hudGfx) return;
+  hudGfx.clear();
+
+  const pipW = 13, pipH = 6, gap = 4;
+  const total = stats.maxHp * (pipW + gap) - gap;
+  let px = CFG.width - 14 - total;
+  for (let i = 0; i < stats.maxHp; i++) {
+    const alive = i < stats.hp;
+    hudGfx.fillStyle(alive ? 0x2ecc71 : 0x2b3a47, alive ? 1 : 0.8);
+    hudGfx.fillRect(px, 34, pipW, pipH);
+    px += pipW + gap;
+  }
+
+  const bx = 14, by = 76, bw = CFG.width - 28, bh = 4;
+  hudGfx.fillStyle(0x1b2733, 0.9);
+  hudGfx.fillRect(bx, by, bw, bh);
+  const frac = Phaser.Math.Clamp(xp / xpToNextLevel, 0, 1);
+  hudGfx.fillStyle(0x4fd6e8, 1);
+  hudGfx.fillRect(bx, by, bw * frac, bh);
+}
+
+// Restores hull and clears the surrounding swarm. Reviving into the
+// same crowd that just killed you is a delay, not a second chance.
+function revivePlayer(scene) {
+  stats.hp = 2;
+  invulnUntil = scene.time.now + 2600;
+
+  enemies.getChildren().slice().forEach(e => {
+    if (!e.active || e.getData('isBoss')) return;
+    if (Phaser.Math.Distance.Between(e.x, e.y, player.x, player.y) < 170) {
+      killEnemy(scene, e);
+    }
+  });
+
+  burst('core', player.x, player.y, 40);
+  scene.cameras.main.flash(420, 80, 255, 160);
+  SFX.levelUp();
+  updateHUD();
+}
+
+function gameOver(scene) {
+  if (isGameOver) return;
+  isGameOver = true;
+  scene.physics.pause();
+  burst('hurt', player.x, player.y, 34);
+  SFX.dead();
+  scene.cameras.main.shake(420, 0.016);
+  player.setTint(0xff0000).setAlpha(1);
+  releaseWake();
+
+  // Offer the continue before anything is banked or recorded — the run
+  // isn't over yet if they take it.
+  if (!usedAdRevive && Ads.available()) showContinueOffer(scene);
+  else showDeathScreen(scene);
+}
+
+function showContinueOffer(scene) {
+  const layer = scene.add.container(0, 0).setDepth(900);
+  layer.add(scene.add.rectangle(CFG.width / 2, CFG.height / 2,
+    CFG.width, CFG.height, 0x000000, 0.72));
+
+  layer.add(scene.add.text(CFG.width / 2, 250, 'CONTINUE?', {
+    fontFamily: FONT.display, fontSize:'32px', fill:'#4fd6e8', fontStyle:'bold' }).setOrigin(0.5));
+  layer.add(scene.add.text(CFG.width / 2, 296,
+    'Revive with 2 hull and a cleared deck', {
+    fontFamily: FONT.display, fontSize:'12px', fill:'#7f8c9a' }).setOrigin(0.5));
+  layer.add(scene.add.text(CFG.width / 2, 320,
+    fmtTime(score) + '  \u2022  Level ' + playerLevel, {
+    fontFamily: FONT.display, fontSize:'12px', fill:'#5a6b7b' }).setOrigin(0.5));
+
+  const watch = panelButton(scene, layer, 400, 'WATCH AD', 0x2ecc71, () => {
+    watch.box.disableInteractive();
+    watch.label.setText('LOADING\u2026');
+    Ads.rewarded(scene,
+      () => {                       // earned it
+        layer.destroy();
+        usedAdRevive = true;
+        isGameOver = false;
+        player.clearTint().setAlpha(1);
+        scene.physics.resume();
+        requestWake();
+        revivePlayer(scene);
+      },
+      () => {                       // skipped, failed, or no fill
+        layer.destroy();
+        showDeathScreen(scene);
+      });
+  });
+
+  panelButton(scene, layer, 468, 'GIVE UP', 0x7f8c9a, () => {
+    layer.destroy();
+    showDeathScreen(scene);
+  });
+}
+
+function showDeathScreen(scene) {
+  const isRecord = recordRun(score, playerLevel, bossCount);
+
+  // Bosses are worth banking even on a short run
+  const bossBonus = bossCount * 25;
+  let earned = Math.round((runCores + bossBonus) * (1 + 0.08 * metaLevel('proc')));
+  meta.salvage += earned;
+  saveMeta();
+
+  const layer = scene.add.container(0, 0).setDepth(900);
+  layer.add(scene.add.rectangle(CFG.width / 2, CFG.height / 2,
+    CFG.width, CFG.height, 0x000000, 0.55));
+
+  layer.add(scene.add.text(CFG.width / 2, 214, 'GAME OVER', {
+    fontFamily: FONT.display, fontSize:'32px', fill:'#ff4757', fontStyle:'bold' }).setOrigin(0.5));
+  layer.add(scene.add.text(CFG.width / 2, 262, fmtTime(score), {
+    fontFamily: FONT.display, fontSize:'28px', fill:'#ffffff', fontStyle:'bold' }).setOrigin(0.5));
+  layer.add(scene.add.text(CFG.width / 2, 290,
+    'Level ' + playerLevel + '   \u2022   ' + bossCount +
+    ' boss' + (bossCount === 1 ? '' : 'es'), {
+    fontFamily: FONT.display, fontSize:'12px', fill:'#7f8c9a' }).setOrigin(0.5));
+
+  if (isRecord) {
+    const nb = scene.add.text(CFG.width / 2, 320, '\u2605  NEW BEST  \u2605', {
+      fontFamily: FONT.display, fontSize:'15px', fill:'#f1c40f', fontStyle:'bold' }).setOrigin(0.5);
+    layer.add(nb);
+    scene.tweens.add({ targets: nb, scale: 1.12, duration: 520,
+                       yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+  } else if (best.time > 0) {
+    layer.add(scene.add.text(CFG.width / 2, 320, 'best  ' + fmtTime(best.time), {
+      fontFamily: FONT.display, fontSize:'12px', fill:'#5a6b7b' }).setOrigin(0.5));
+  }
+
+  const payout = scene.add.text(CFG.width / 2, 350, '\u2726 SALVAGE  +' + earned, {
+    fontFamily: FONT.display, fontSize:'17px', fill:'#f1c40f', fontStyle:'bold' }).setOrigin(0.5);
+  const detail = scene.add.text(CFG.width / 2, 372,
+    runCores + ' cores' + (bossBonus ? '  +  ' + bossBonus + ' boss bonus' : '') +
+    '   \u2022   banked ' + meta.salvage, {
+    fontFamily: FONT.display, fontSize:'10px', fill:'#7f8c9a' }).setOrigin(0.5);
+  layer.add([payout, detail]);
+
+  scene.time.delayedCall(CFG.restartLockout, () => {
+    canRestart = true;
+
+    // Interstitial goes on the way OUT, not here — nobody wants a full
+    // screen ad the instant they die.
+    const leave = (go) => {
+      if (!canRestart) return;
+      prefs.runsSinceAd = (prefs.runsSinceAd || 0) + 1;
+      if (prefs.runsSinceAd >= CFG.interstitialEvery && !usedAdRevive && !doubledSalvage) {
+        prefs.runsSinceAd = 0;
+        Ads.interstitial();
+      }
+      savePrefs();
+      go();
+    };
+
+    if (earned > 0 && !doubledSalvage && Ads.available()) {
+      const dbl = panelButton(scene, layer, 424, 'DOUBLE SALVAGE', 0xf1c40f, () => {
+        dbl.box.disableInteractive();
+        dbl.label.setText('LOADING\u2026');
+        Ads.rewarded(scene,
+          () => {
+            doubledSalvage = true;
+            meta.salvage += earned;
+            earned *= 2;
+            saveMeta();
+            payout.setText('\u2726 SALVAGE  +' + earned);
+            detail.setText('doubled   \u2022   banked ' + meta.salvage);
+            dbl.box.destroy();
+            dbl.label.destroy();
+            SFX.levelUp();
+          },
+          () => {
+            dbl.label.setText('DOUBLE SALVAGE');
+            dbl.box.setInteractive({ useHandCursor: true });
+          });
+      });
+    }
+
+    panelButton(scene, layer, 500, 'PLAY AGAIN', 0x2ecc71,
+      () => leave(() => scene.scene.restart()));
+    panelButton(scene, layer, 568, 'MENU', 0x7f8c9a,
+      () => leave(() => scene.scene.start('Title')));
+  });
+}
+
+}
+</script>
+</body>
+</html>
