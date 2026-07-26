@@ -1,0 +1,96 @@
+name: Build Release AAB
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Create Capacitor project
+        run: |
+          npm init -y
+          npm install @capacitor/core @capacitor/cli @capacitor/android
+          npx cap init "Ultimate Survivor" com.fatefulgames.ultimatesurvivor --web-dir=www
+          mkdir -p www
+          cp ultimate-survivor.html www/index.html
+          npx cap add android
+
+      - name: Set dark background
+        run: |
+          node -e "
+            const fs = require('fs');
+            const c = JSON.parse(fs.readFileSync('capacitor.config.json', 'utf8'));
+            c.android = Object.assign({}, c.android, { backgroundColor: '#0a0e14' });
+            fs.writeFileSync('capacitor.config.json', JSON.stringify(c, null, 2));
+          "
+          npx cap sync android
+
+      - name: Generate icons and splash
+        run: |
+          npm install --save-dev @capacitor/assets
+          npx @capacitor/assets generate --android \
+            --splashBackgroundColor '#20143E' \
+            --splashBackgroundColorDark '#20143E' \
+            --iconBackgroundColor '#0A0E14' \
+            --iconBackgroundColorDark '#0A0E14'
+          test -f android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_foreground.png \
+            || { echo "::error::icon generation produced nothing"; exit 1; }
+
+      - name: Lock to portrait
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          sed -i 's|android:name=".MainActivity"|android:name=".MainActivity" android:screenOrientation="portrait"|' $MANIFEST
+          grep -q 'screenOrientation="portrait"' $MANIFEST \
+            || { echo "::error::portrait patch did not apply"; exit 1; }
+
+      - name: Set version
+        run: |
+          GRADLE=android/app/build.gradle
+          sed -i "s/versionCode 1/versionCode ${{ github.run_number }}/" $GRADLE
+          sed -i "s/versionName \"1.0\"/versionName \"1.0.${{ github.run_number }}\"/" $GRADLE
+          grep -E 'versionCode|versionName' $GRADLE
+
+      - name: Restore keystore
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          echo "$KS_B64" | base64 -d > release.keystore
+          test -s release.keystore || { echo "::error::keystore did not decode - check KEYSTORE_BASE64"; exit 1; }
+
+      - name: Build and sign bundle
+        env:
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          cd android
+          ./gradlew bundleRelease --no-daemon
+          AAB=$(find app/build/outputs/bundle/release -name '*.aab' | head -1)
+          test -n "$AAB" || { echo "::error::no aab was produced"; exit 1; }
+          jarsigner -keystore ../release.keystore \
+            -storepass "$KS_PASS" -keypass "$KS_PASS" \
+            -sigalg SHA256withRSA -digestalg SHA-256 \
+            "$AAB" "$KS_ALIAS"
+          jarsigner -verify "$AAB" | tail -3
+          mv "$AAB" ../ultimate-survivor-release.aab
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-aab
+          path: ultimate-survivor-release.aab
+          if-no-files-found: error
